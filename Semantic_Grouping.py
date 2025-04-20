@@ -4,30 +4,22 @@ import json
 import numpy as np
 from dotenv import load_dotenv
 import os
-
+from Tool.Sentence_Detector import sentence_detector
+from Tool.Sentence_Embedding import sentence_embedding
 load_dotenv()
-doc = pd.read_csv('ms_marco_1000.csv')
-passage = doc['passage'].tolist()
 
-def insert_semantic_grouping(original_text, sentences, embedding_vectors, semantic_chunks):
-    """Insert data into Semantic_Grouping table."""
-    conn = connect_to_db()
-    cursor = conn.cursor()
-    
-    # Convert numpy arrays to lists for JSON serialization
-    embedding_vectors_list = [vector.tolist() for vector in embedding_vectors]
-    
-    cursor.execute(
-        """
-        INSERT INTO Semantic_Grouping 
-        (Original_Paragraph, Sentences, Embedding_Vectors, Semantic_Chunking)
-        VALUES (%s, %s, %s, %s)
-        RETURNING id
-        """,
-        (
-            original_text,
-            json.dumps(sentences),
-            json.dumps(embedding_vectors_list),
-            json.dumps(semantic_chunks)
-        )
-    )
+doc = pd.read_csv('passages_1000.csv')
+passage = doc['passage_text'].tolist()
+
+def to_sentences(passage):
+    sentences = []
+    for text in passage:
+        sentences.append(sentence_detector(text))
+    return sentences
+
+def to_vectors(sentences):
+    vectors = []
+    for sentence in sentences:
+        vectors.append(sentence_embedding(sentence))
+    return vectors
+
