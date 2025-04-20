@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
-#doc = pd.read_csv('Data/doc.csv')
+doc = pd.read_csv('ms_marco_1000.csv')
+passage = doc['passage'].tolist()
 
 def insert_semantic_grouping(original_text, sentences, embedding_vectors, semantic_chunks):
     """Insert data into Semantic_Grouping table."""
