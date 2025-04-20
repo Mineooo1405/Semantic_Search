@@ -1,15 +1,20 @@
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
+user = "postgres"
+password = 140504
+port = 5432
+name_dbname = "semantic_search_db"
+
 def create_database_and_tables():
     # Connection parameters - adjust these as needed
     db_params = {
         'initial_dbname': 'postgres',  
-        'user': 'postgres',           
-        'password': '140504',   
+        'user': {user},
+        'password': {password},             
         'host': 'localhost',
-        'port': '5432',
-        'new_dbname': 'semantic_search_db'
+        'port': {port},
+        'new_dbname': {name_dbname}
     }
     
     # Connect to default database
@@ -82,6 +87,17 @@ def create_database_and_tables():
     
     cursor.close()
     conn.close()
+
+def connect_to_db():
+    """Connect to the PostgreSQL database."""
+    conn = psycopg2.connect(
+        dbname="semantic_search_db",
+        user={user},
+        password={password},  # Change this
+        host="localhost",
+        port={port}
+    )
+    return conn
 
 if __name__ == "__main__":
     create_database_and_tables()

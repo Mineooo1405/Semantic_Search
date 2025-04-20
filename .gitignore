@@ -7,3 +7,6 @@ myenv/
 *.pkl
 *.log
 __pycache__/
+Data/
+EmbeddingModel/
+nltk_data/

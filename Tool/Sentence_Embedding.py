@@ -1,5 +1,11 @@
+import os
+os.environ["HF_HOME"] = "D:/SemanticSearch/EmbeddingModel"
+os.environ["SENTENCE_TRANSFORMERS_HOME"] = "D:/SemanticSearch/EmbeddingModel"
+
 from sentence_transformers import SentenceTransformer
 
-model = SentenceTransformer("all-mpnet-base-v2")  # Hoặc: all-MiniLM-L6-v2
-vec = model.encode("This is an example sentence.")
-print(vec)
+def sentence_embedding(text):
+    
+    model = SentenceTransformer("all-mpnet-base-v2")
+    
+    return model.encode("This is an example sentence.")

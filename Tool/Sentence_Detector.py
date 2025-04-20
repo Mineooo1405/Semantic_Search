@@ -1,5 +1,11 @@
 from nltk.tokenize import sent_tokenize
+import nltk
 
-text = "Hello! How are you doing today? I hope all is well."
-sentences = sent_tokenize(text)
-print(sentences)
+def sentence_detector(text):
+    
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt')
+ 
+    return sent_tokenize(text)
