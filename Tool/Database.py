@@ -1,23 +1,27 @@
+import os
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from dotenv import load_dotenv
 
-user = "postgres"
-password = 140504
-port = 5432
-name_dbname = "semantic_search_db"
+# Load environment variables
+load_dotenv()
+
+# Get database configuration from environment variables with defaults
+user = os.getenv("DB_USER")
+password = os.getenv("DB_PASSWORD")
+port = int(os.getenv("DB_PORT"))
+name_dbname = os.getenv("DB_NAME")
 
 def create_database_and_tables():
-    # Connection parameters - adjust these as needed
     db_params = {
         'initial_dbname': 'postgres',  
-        'user': {user},
-        'password': {password},             
+        'user': user,            
+        'password': password,    
         'host': 'localhost',
-        'port': {port},
-        'new_dbname': {name_dbname}
+        'port': port,            
+        'new_dbname': name_dbname 
     }
     
-    # Connect to default database
     conn = psycopg2.connect(
         dbname=db_params['initial_dbname'],
         user=db_params['user'],
@@ -29,7 +33,6 @@ def create_database_and_tables():
     conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
     cursor = conn.cursor()
     
-    # Create new database
     try:
         cursor.execute(f"CREATE DATABASE {db_params['new_dbname']}")
         print(f"Database '{db_params['new_dbname']}' created successfully.")
@@ -39,7 +42,6 @@ def create_database_and_tables():
         cursor.close()
         conn.close()
     
-    # Connect to the new database
     conn = psycopg2.connect(
         dbname=db_params['new_dbname'],
         user=db_params['user'],
@@ -54,10 +56,11 @@ def create_database_and_tables():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS Semantic_Grouping (
         id SERIAL PRIMARY KEY,
+        query TEXT NOT NULL,  
         Original_Paragraph TEXT NOT NULL,
-        Sentences JSONB NOT NULL,  -- List of sentences
-        Embedding_Vectors JSONB NOT NULL,  -- List of embedding vectors
-        Semantic_Chunking JSONB NOT NULL  -- List of chunks (each chunk is a list of related sentences)
+        Sentences JSONB NOT NULL,  
+        Embedding_Vectors JSONB NOT NULL,  
+        Semantic_Chunking JSONB NOT NULL  
     );
     """)
     
@@ -65,10 +68,11 @@ def create_database_and_tables():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS Semantic_Splitter (
         id SERIAL PRIMARY KEY,
+        query TEXT NOT NULL,  
         Original_Paragraph TEXT NOT NULL,
-        Sentences JSONB NOT NULL,  -- List of sentences
-        Embedding_Vectors JSONB NOT NULL,  -- List of embedding vectors
-        Semantic_Chunking JSONB NOT NULL  -- List of chunks (each chunk is a list of related sentences)
+        Sentences JSONB NOT NULL,  
+        Embedding_Vectors JSONB NOT NULL,  
+        Semantic_Chunking JSONB NOT NULL  
     );
     """)
     
@@ -76,9 +80,23 @@ def create_database_and_tables():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS Text_Splitter (
         id SERIAL PRIMARY KEY,
+        query TEXT NOT NULL,  
         Original_Paragraph TEXT NOT NULL,
-        Sentences JSONB NOT NULL,  -- List of sentences
-        Chunking JSONB NOT NULL  -- List of chunks based on predefined length
+        Sentences JSONB NOT NULL,  
+        Chunking JSONB NOT NULL  
+    );
+    """)
+    
+    # Create MS_MARCO table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS MS_MARCO (
+        id SERIAL PRIMARY KEY,
+        query_id TEXT NOT NULL,
+        query TEXT NOT NULL,
+        query_type TEXT,
+        answers JSONB,  
+        passages JSONB,  
+        well_formed_answers JSONB  
     );
     """)
     
@@ -92,10 +110,10 @@ def connect_to_db():
     """Connect to the PostgreSQL database."""
     conn = psycopg2.connect(
         dbname="semantic_search_db",
-        user={user},
-        password={password},  # Change this
+        user=user,           
+        password=password,   
         host="localhost",
-        port={port}
+        port=port            
     )
     return conn
 
