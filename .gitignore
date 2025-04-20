@@ -10,4 +10,4 @@ __pycache__/
 Data/
 EmbeddingModel/
 nltk_data/
-.env/
+.env
