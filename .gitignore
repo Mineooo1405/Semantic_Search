@@ -1,0 +1,9 @@
+# .gitignore
+myenv/
+*.dll
+*.lib
+*.exe
+*.pt
+*.pkl
+*.log
+__pycache__/
