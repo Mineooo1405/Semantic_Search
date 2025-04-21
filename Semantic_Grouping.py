@@ -111,6 +111,9 @@ def analyze_similarity_distribution(similarity_matrix, sentences=None):
     print("\nCác cặp câu và relationship (sắp xếp theo relationship giảm dần):")
     for i, j, sim in similarity_pairs[:20]:  # Hiển thị 20 cặp đầu tiên
         if sentences:
+            sentence_i = sentences[i].replace("\n", " ").strip()
+            sentence_j = sentences[j].replace("\n", " ").strip()
+            
             sentence_i = sentences[i][:30] + "..." if len(sentences[i]) > 30 else sentences[i]
             sentence_j = sentences[j][:30] + "..." if len(sentences[j]) > 30 else sentences[j]
             print(f"Câu {i} và câu {j}: {sim:.4f} - [{sentence_i}] và [{sentence_j}]")
