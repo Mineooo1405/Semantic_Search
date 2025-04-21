@@ -8,15 +8,12 @@ from dotenv import load_dotenv
 from Tool.Sentence_Detector import sentence_detector
 from Tool.Database import connect_to_db
 
-# Download NLTK data for sentence tokenization if not already present
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
     nltk.download('punkt')
 
 load_dotenv()
-
-#=============== CÁC HÀM TIỆN ÍCH CƠ BẢN ====================
 
 def to_sentences(passage):
     """
@@ -47,8 +44,6 @@ def calculate_chunk_stats(chunks):
         'max_length': max(len(c) for c in chunks) if chunks else 0
     }
     return stats
-
-#=============== THUẬT TOÁN CHIA VĂN BẢN ===================
 
 def split_by_character(text, chunk_size=1000, chunk_overlap=200):
     """
