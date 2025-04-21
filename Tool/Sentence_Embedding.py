@@ -8,4 +8,4 @@ def sentence_embedding(text):
     
     model = SentenceTransformer("all-mpnet-base-v2")
     
-    return model.encode("This is an example sentence.")
+    return model.encode(text)
