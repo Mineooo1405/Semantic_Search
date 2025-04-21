@@ -145,21 +145,23 @@ def analyze_similarity_distribution(similarity_matrix, sentences=None):
 
 def semantic_sequential_spreading(sentences, similarity_matrix, 
                                  initial_threshold=0.6, 
-                                 decay_factor=0.9, 
-                                 min_threshold=0.3, 
+                                 decay_factor=0.95,
+                                 min_threshold=0.35,
                                  min_chunk_len=1, 
-                                 max_chunk_len=10):
+                                 max_chunk_len=10,
+                                 window_size=3):
     """
-    Phân đoạn văn bản theo tuần tự với lan truyền  và ngưỡng động
+    Phân đoạn văn bản theo tuần tự với lan truyền và ngưỡng động cải tiến
     
     Args:
         sentences: Danh sách các câu
         similarity_matrix: Ma trận tương đồng
         initial_threshold: Ngưỡng tương đồng ban đầu
-        decay_factor: Hệ số giảm ngưỡng sau mỗi đoạn (0.9 = giảm 10%)
+        decay_factor: Hệ số giảm ngưỡng sau mỗi đoạn
         min_threshold: Ngưỡng tương đồng tối thiểu
         min_chunk_len: Độ dài tối thiểu của mỗi đoạn (số câu)
         max_chunk_len: Độ dài tối đa của mỗi đoạn (số câu)
+        window_size: Kích thước cửa sổ xem xét xu hướng tương đồng
         
     Returns:
         list: Danh sách các đoạn, mỗi đoạn là một list các chỉ số câu
@@ -179,32 +181,30 @@ def semantic_sequential_spreading(sentences, similarity_matrix,
         current_segment = [processed]  # Bắt đầu với câu đầu tiên chưa xử lý
         last_idx = processed
         
-        # Mở rộng đoạn hiện tại bằng cách thêm các câu tiếp theo
-        while last_idx + 1 < n:  # Còn câu tiếp theo để xét
+        # Mở rộng đoạn hiện tại cho đến khi gặp điểm ngắt hoặc hết câu
+        while last_idx + 1 < n:
             next_idx = last_idx + 1
             sim = similarity_matrix[last_idx][next_idx]
             
-            # Trường hợp 1: Độ tương đồng đủ cao và đoạn chưa đạt độ dài tối đa
-            if sim >= current_threshold and len(current_segment) < max_chunk_len:
-                current_segment.append(next_idx)
-                last_idx = next_idx
-                print(f"[ADD] Thêm câu {next_idx} vào đoạn: {sim:.4f} >= {current_threshold:.4f}")
+            # Tính xu hướng tương đồng cục bộ (trung bình với các câu tiếp theo)
+            avg_local_trend = calculate_local_trend(similarity_matrix, last_idx, window_size, n)
             
-            # Trường hợp 2: Độ tương đồng không đủ cao, nhưng đoạn chưa đủ dài tối thiểu
-            elif len(current_segment) < min_chunk_len:
-                # Chúng ta buộc phải thêm câu tiếp theo vào để đạt độ dài tối thiểu
-                current_segment.append(next_idx)
-                last_idx = next_idx
-                print(f"[FORCE] Buộc thêm câu {next_idx} vào đoạn để đạt độ dài tối thiểu, mặc dù {sim:.4f} < {current_threshold:.4f}")
+            # Kiểm tra các điều kiện theo thứ tự ưu tiên
+            should_break, reason = check_break_conditions(
+                sim, current_threshold, current_segment, 
+                next_idx, min_chunk_len, max_chunk_len, avg_local_trend,
+                similarity_matrix
+            )
             
-            # Trường hợp 3: Độ tương đồng không đủ cao và đoạn đã đủ dài tối thiểu
-            else:
-                # Kết thúc đoạn hiện tại
-                if sim < current_threshold:
-                    print(f"[BREAK] Điểm tách tại {last_idx}-{next_idx}: {sim:.4f} < {current_threshold:.4f}")
-                else:
-                    print(f"[BREAK] Điểm tách tại {last_idx}-{next_idx}: đoạn đạt độ dài tối đa ({max_chunk_len} câu)")
+            if should_break:
+                print(reason)
                 break
+                
+            # Nếu không break, thêm câu vào đoạn hiện tại và cập nhật chỉ số
+            add_reason = get_add_reason(sim, current_threshold, avg_local_trend, len(current_segment), min_chunk_len)
+            current_segment.append(next_idx)
+            last_idx = next_idx
+            print(add_reason)
         
         # Thêm đoạn hiện tại vào kết quả
         segments.append(current_segment)
@@ -212,12 +212,13 @@ def semantic_sequential_spreading(sentences, similarity_matrix,
         
         print(f"[SUCCESS] Đã tạo đoạn {len(segments)} với {len(current_segment)} câu: {current_segment}")
         
-        # Giảm ngưỡng cho đoạn tiếp theo
+        # Điều chỉnh ngưỡng cho đoạn tiếp theo nếu còn câu chưa xử lý
         if processed < n:
             old_threshold = current_threshold
-            current_threshold *= decay_factor
-            if current_threshold < min_threshold:
-                current_threshold = min_threshold
+            current_threshold = adjust_threshold(
+                current_threshold, current_segment, 
+                decay_factor, min_threshold, min_chunk_len, max_chunk_len
+            )
             print(f"[ADAPT] Giảm ngưỡng từ {old_threshold:.4f} xuống {current_threshold:.4f} cho đoạn tiếp theo")
     
     # Hiển thị kết quả phân đoạn
@@ -226,6 +227,84 @@ def semantic_sequential_spreading(sentences, similarity_matrix,
         print(f"[SEGMENT] Đoạn {i+1}: {len(segment)} câu - {segment}")
     
     return segments
+
+def calculate_local_trend(similarity_matrix, current_idx, window_size, n):
+    """Tính xu hướng tương đồng cục bộ"""
+    local_trend = 0
+    valid_comparisons = 0
+    
+    for look_ahead in range(1, min(window_size + 1, n - current_idx)):
+        if current_idx + look_ahead < n:
+            local_trend += similarity_matrix[current_idx][current_idx + look_ahead]
+            valid_comparisons += 1
+    
+    return local_trend / valid_comparisons if valid_comparisons > 0 else 0
+
+def check_break_conditions(sim, threshold, current_segment, next_idx, min_chunk_len, max_chunk_len, avg_local_trend, similarity_matrix):
+    """Kiểm tra các điều kiện để ngắt đoạn"""
+    
+    # 1. Kiểm tra độ dài tối đa
+    if len(current_segment) >= max_chunk_len:
+        return True, f"[BREAK] Điểm tách tại {current_segment[-1]}-{next_idx}: đoạn đạt độ dài tối đa ({max_chunk_len} câu)"
+    
+    # 2. Phát hiện thay đổi chủ đề mạnh
+    if sim < threshold * 0.7 and len(current_segment) >= min_chunk_len:
+        # Kiểm tra thêm câu tiếp theo để xác nhận thay đổi chủ đề
+        topic_change = is_topic_change(similarity_matrix, current_segment[-1], next_idx)
+        if topic_change:
+            return True, f"[TOPIC] Phát hiện thay đổi chủ đề tại {current_segment[-1]}-{next_idx}: {sim:.4f} < {threshold*0.7:.4f}"
+    
+    # 3. Kiểm tra độ tương đồng xấp xỉ ngưỡng và xu hướng không tốt
+    if (sim >= threshold * 0.85 and sim < threshold and 
+        avg_local_trend < threshold * 0.9 and 
+        len(current_segment) >= min_chunk_len):
+        return True, f"[BREAK] Điểm tách tại {current_segment[-1]}-{next_idx}: {sim:.4f} < {threshold:.4f} (xu hướng không đủ tốt)"
+    
+    # 4. Kiểm tra nếu độ tương đồng thấp hơn ngưỡng và đoạn đã đủ dài
+    if sim < threshold and len(current_segment) >= min_chunk_len:
+        return True, f"[BREAK] Điểm tách tại {current_segment[-1]}-{next_idx}: {sim:.4f} < {threshold:.4f}"
+    
+    # Nếu không có điều kiện ngắt nào được thỏa mãn
+    return False, ""
+
+def is_topic_change(similarity_matrix, current_idx, next_idx):
+    """Kiểm tra xem có phải thay đổi chủ đề hay không"""
+    if next_idx + 1 >= len(similarity_matrix):
+        return True
+        
+    current_next_sim = similarity_matrix[current_idx][next_idx]
+    next_next_sim = similarity_matrix[next_idx][next_idx + 1]
+    
+    # Nếu câu tiếp theo có tương đồng cao hơn nhiều với câu sau nó
+    # so với tương đồng với câu hiện tại -> có thay đổi chủ đề
+    return next_next_sim > current_next_sim * 1.5
+
+def get_add_reason(sim, threshold, avg_local_trend, segment_len, min_chunk_len):
+    """Tạo lý do cho việc thêm câu vào đoạn"""
+    if sim >= threshold:
+        return f"[ADD] Thêm câu vào đoạn: {sim:.4f} >= {threshold:.4f}"
+    elif sim >= threshold * 0.85 and avg_local_trend >= threshold * 0.9:
+        return f"[TREND] Thêm câu dựa vào xu hướng tốt ({avg_local_trend:.4f}): {sim:.4f} gần với {threshold:.4f}"
+    elif segment_len < min_chunk_len:
+        return f"[FORCE] Buộc thêm câu để đạt độ dài tối thiểu, mặc dù {sim:.4f} < {threshold:.4f}"
+    else:
+        return f"[ADD] Thêm câu vào đoạn (trường hợp mặc định)"
+
+def adjust_threshold(current_threshold, current_segment, decay_factor, min_threshold, min_chunk_len, max_chunk_len):
+    """Điều chỉnh ngưỡng cho đoạn tiếp theo"""
+    adaptive_decay = decay_factor
+    
+    # Điều chỉnh hệ số dựa trên chất lượng đoạn hiện tại
+    if len(current_segment) <= min_chunk_len:
+        # Đoạn quá ngắn, giảm ngưỡng mạnh hơn
+        adaptive_decay *= 0.95
+    elif len(current_segment) >= max_chunk_len:
+        # Đoạn đạt độ dài tối đa, giảm ngưỡng ít hơn
+        adaptive_decay *= 1.05
+    
+    # Tính ngưỡng mới và đảm bảo không dưới ngưỡng tối thiểu
+    new_threshold = current_threshold * adaptive_decay
+    return max(new_threshold, min_threshold)
 
 def visualize_similarity_matrix(matrix, groups=None, title="Semantic Similarity Matrix"):
     """
