@@ -247,7 +247,7 @@ def semantic_spreading_grouping(similarity_matrix, initial_threshold=0.75, decay
             print(f"  Tạo nhóm đơn lẻ cho câu {anchor}")
     
     # Hiển thị thống kê về các nhóm
-    print(f"\nĐã phân thành {len(groups)} nhóm ngữ nghĩa:")
+    print(f"\nĐã phân thành {len(groups)} nhóm :")
     for i, group in enumerate(groups):
         print(f"  Nhóm {i+1}: {len(group)} câu - {group}")
     
@@ -342,7 +342,7 @@ def process_passage(passage, passage_id, query="", visualize=True, save_to_db=Tr
     # Tạo vector nhúng
     vectors = to_vectors(sentences)
     
-    # Tạo ma trận ngữ nghĩa
+    # Tạo ma trận 
     sim_matrix = create_semantic_matrix(vectors)
     
     # Phân tích phân bố relationship và đưa ra đề xuất threshold
@@ -381,7 +381,7 @@ def process_passage(passage, passage_id, query="", visualize=True, save_to_db=Tr
     
     # Phân nhóm câu với threshold giảm dần
     groups = semantic_spreading_grouping(sim_matrix, initial_threshold, decay_factor, min_threshold)
-    print(f"Đã phân thành {len(groups)} nhóm ngữ nghĩa")
+    print(f"Đã phân thành {len(groups)} nhóm ")
     
     # Hiển thị kết quả
     for i, group in enumerate(groups):
@@ -395,7 +395,7 @@ def process_passage(passage, passage_id, query="", visualize=True, save_to_db=Tr
     # Trực quan hóa ma trận
     if visualize:
         visualize_similarity_matrix(sim_matrix, groups, 
-                                  title=f"Ma trận relationship ngữ nghĩa - Passage {passage_id}")
+                                  title=f"Ma trận relationship  - Passage {passage_id}")
     
     # Lưu kết quả vào database nếu được yêu cầu
     if save_to_db:
@@ -489,7 +489,7 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     # Tạo vector nhúng
     vectors = to_vectors(sentences)
     
-    # Tạo ma trận ngữ nghĩa
+    # Tạo ma trận 
     sim_matrix = create_semantic_matrix(vectors)
     
     # Phân tích phân bố relationship và đưa ra đề xuất threshold
@@ -528,7 +528,7 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     
     # Phân nhóm câu với threshold giảm dần
     groups = semantic_spreading_grouping(sim_matrix, initial_threshold, decay_factor, min_threshold)
-    print(f"Đã phân thành {len(groups)} nhóm ngữ nghĩa")
+    print(f"Đã phân thành {len(groups)} nhóm ")
     
     # Hiển thị kết quả
     for i, group in enumerate(groups):
@@ -545,7 +545,7 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     # Trực quan hóa ma trận
     if visualize:
         visualize_similarity_matrix(sim_matrix, groups, 
-                                  title=f"Ma trận relationship ngữ nghĩa - {document_id}")
+                                  title=f"Ma trận relationship  - {document_id}")
     
     # Xuất kết quả ra file để người dùng có thể tham khảo chi tiết
     export_results_to_file(document, sentences, groups, document_id)
@@ -561,12 +561,12 @@ def export_results_to_file(document, sentences, groups, document_id):
     filename = f"semantic_groups_{document_id.replace(' ','_')}.txt"
     try:
         with open(filename, 'w', encoding='utf-8') as f:
-            f.write(f"KẾT QUẢ PHÂN NHÓM NGỮ NGHĨA\n")
+            f.write(f"KẾT QUẢ PHÂN NHÓM \n")
             f.write(f"Tài liệu: {document_id}\n")
             f.write(f"Thời gian: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
             f.write(f"Tổng số câu: {len(sentences)}\n")
-            f.write(f"Số nhóm ngữ nghĩa: {len(groups)}\n\n")
+            f.write(f"Số nhóm : {len(groups)}\n\n")
             
             for i, group in enumerate(groups):
                 f.write(f"NHÓM {i+1} ({len(group)} câu):\n")
@@ -578,7 +578,6 @@ def export_results_to_file(document, sentences, groups, document_id):
     except Exception as e:
         print(f"Lỗi khi xuất kết quả ra file: {e}")
 
-# Thay đổi main để sử dụng hàm mới
 if __name__ == "__main__":
     print("1. Xử lý passages từ tập dữ liệu")
     print("2. Phân tích tài liệu tự nhập hoặc từ file")
@@ -612,5 +611,3 @@ if __name__ == "__main__":
     
     else:
         print("Lựa chọn không hợp lệ.")
-
-
