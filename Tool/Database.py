@@ -52,7 +52,7 @@ def create_database_and_tables():
     
     cursor = conn.cursor()
     
-    # Create Semantic_Grouping table
+    # Create Semantic_Grouping table with OIE_Triples
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS Semantic_Grouping (
         id SERIAL PRIMARY KEY,
@@ -60,11 +60,13 @@ def create_database_and_tables():
         Original_Paragraph TEXT NOT NULL,
         Sentences JSONB NOT NULL,  
         Embedding_Vectors JSONB NOT NULL,  
-        Semantic_Chunking JSONB NOT NULL  
+        Semantic_Chunking JSONB NOT NULL,
+        OIE_Triples JSONB,          -- Lưu trữ triples từ OpenIE theo nhóm câu
+        OIE_Sentence_Groups JSONB   -- Lưu trữ cấu trúc nhóm câu và triples
     );
     """)
     
-    # Create Semantic_Splitter table
+    # Create Semantic_Splitter table with OIE_Triples
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS Semantic_Splitter (
         id SERIAL PRIMARY KEY,
@@ -72,18 +74,22 @@ def create_database_and_tables():
         Original_Paragraph TEXT NOT NULL,
         Sentences JSONB NOT NULL,  
         Embedding_Vectors JSONB NOT NULL,  
-        Semantic_Chunking JSONB NOT NULL  
+        Semantic_Chunking JSONB NOT NULL,
+        OIE_Triples JSONB,          -- Lưu trữ triples từ OpenIE theo nhóm câu
+        OIE_Sentence_Groups JSONB   -- Lưu trữ cấu trúc nhóm câu và triples
     );
     """)
     
-    # Create Text_Splitter table
+    # Create Text_Splitter table with OIE_Triples
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS Text_Splitter (
         id SERIAL PRIMARY KEY,
         query TEXT NOT NULL,  
         Original_Paragraph TEXT NOT NULL,
         Sentences JSONB NOT NULL,  
-        Chunking JSONB NOT NULL  
+        Chunking JSONB NOT NULL,
+        OIE_Triples JSONB,          -- Lưu trữ tất cả triples từ OpenIE
+        OIE_Sentence_Groups JSONB   -- Lưu trữ cấu trúc nhóm câu và triples
     );
     """)
     
