@@ -4,8 +4,9 @@ import json
 import numpy as np
 from dotenv import load_dotenv
 import os
-from Tool.Sentence_Detector import sentence_detector
+from Tool.Sentence_Detector import sentence_detector, enhanced_sentence_detector, spacy_sentence_splitter
 from Tool.Sentence_Embedding import sentence_embedding
+from Tool.OIE import extract_triples_for_search  # Thêm import OIE
 import matplotlib.pyplot as plt
 import seaborn as sns
 import time
@@ -13,8 +14,37 @@ import pickle
 
 load_dotenv()
 
-def to_sentences(passage):
-    return sentence_detector(passage)
+def to_sentences(passage, use_enhanced=True):
+    """
+    Tách đoạn văn thành các câu riêng biệt tối ưu cho OIE
+    
+    Args:
+        passage: Đoạn văn bản cần tách
+        use_enhanced: Sử dụng phương pháp tách câu nâng cao
+        
+    Returns:
+        list: Danh sách các câu đã được chia nhỏ
+    """
+    try:
+        if use_enhanced:
+            # Thử sử dụng spaCy
+            try:
+                original, sub_sentences = spacy_sentence_splitter(passage)
+                print(f"[INFO] Đã tách thành {len(original)} câu gốc và {len(sub_sentences)} câu con với spaCy")
+                return sub_sentences
+            except:
+                # Nếu spaCy không khả dụng, dùng phương pháp nâng cao
+                sentences = enhanced_sentence_detector(passage, aggressive=True)
+                print(f"[INFO] Đã tách thành {len(sentences)} câu con với detector nâng cao")
+                return sentences
+    except Exception as e:
+        print(f"[WARNING] Lỗi khi sử dụng phương pháp tách câu nâng cao: {e}")
+        print("[INFO] Sử dụng phương pháp cơ bản làm dự phòng")
+    
+    # Phương pháp dự phòng
+    sentences = sentence_detector(passage)
+    print(f"[INFO] Đã tách thành {len(sentences)} câu với detector cơ bản")
+    return sentences
 
 def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
     cache_file = f"{cache_prefix}{hash(str(sentences))}.pkl"
@@ -283,6 +313,39 @@ def visualize_similarity_matrix(matrix, groups=None, title="Semantic Similarity 
     plt.savefig('similarity_matrix_with_groups.png')
     plt.show()
 
+def display_oie_triples(groups, sentences, sentence_triples, max_display=3):
+    """
+    Hiển thị các triples được trích xuất từ các nhóm câu
+    
+    Args:
+        groups: Các nhóm câu
+        sentences: Danh sách các câu
+        sentence_triples: Danh sách triples theo từng câu
+        max_display: Số triples tối đa hiển thị cho mỗi câu
+    """
+    print("\n=== TRÍCH XUẤT QUAN HỆ THEO NHÓM ===")
+    
+    for i, group in enumerate(groups):
+        print(f"\nNhóm {i+1}:")
+        group_has_triples = False
+        
+        for idx in group:
+            triples = sentence_triples[idx]
+            if triples:
+                group_has_triples = True
+                sentence_preview = sentences[idx][:50] + "..." if len(sentences[idx]) > 50 else sentences[idx]
+                print(f"  Câu {idx}: {sentence_preview}")
+                
+                # Hiển thị một số triples
+                for j, triple in enumerate(triples[:max_display]):
+                    print(f"    - {triple['subject']} | {triple['relation']} | {triple['object']}")
+                
+                if len(triples) > max_display:
+                    print(f"    - ... và {len(triples) - max_display} quan hệ khác")
+        
+        if not group_has_triples:
+            print("  Không có quan hệ nào được trích xuất trong nhóm này")
+
 def save_to_database(query, passage, sentences, vectors, chunks):
     """Lưu kết quả phân nhóm vào database"""
     conn = connect_to_db()
@@ -326,32 +389,81 @@ def save_to_database(query, passage, sentences, vectors, chunks):
         cursor.close()
         conn.close()
 
-def process_passage(passage, passage_id, query="", visualize=True, save_to_db=True):
-    """Xử lý một đoạn văn: phát hiện câu, nhúng, phân nhóm và lưu kết quả"""
+def save_to_database_with_oie(query, passage, sentences, vectors, chunks, all_triples, oie_sentence_groups):
+    """Lưu kết quả phân nhóm và trích xuất OIE vào database"""
+    conn = connect_to_db()
+    cursor = conn.cursor()
+    
+    # Chuyển đổi dữ liệu Python thành JSON để lưu trữ
+    sentences_json = json.dumps([str(s) for s in sentences])
+    
+    # Đối với vectors, cần chuyển numpy arrays thành lists trước
+    vectors_list = [v.tolist() for v in vectors]
+    vectors_json = json.dumps(vectors_list)
+    
+    # Chuyển chunks thành JSON
+    chunks_json = json.dumps([[int(idx) for idx in group] for group in chunks])
+    
+    # JSON cho OpenIE triples
+    all_triples_json = json.dumps(all_triples)
+    oie_sentence_groups_json = json.dumps(oie_sentence_groups)
+    
+    try:
+        cursor.execute(
+            """
+            INSERT INTO Semantic_Grouping 
+            (query, Original_Paragraph, Sentences, Embedding_Vectors, Semantic_Chunking, OIE_Triples, OIE_Sentence_Groups)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                query,
+                passage,
+                sentences_json,
+                vectors_json,
+                chunks_json,
+                all_triples_json,
+                oie_sentence_groups_json
+            )
+        )
+        
+        inserted_id = cursor.fetchone()[0]
+        conn.commit()
+        print(f"Đã lưu kết quả vào database với ID: {inserted_id}")
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"Lỗi khi lưu vào database: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+def process_passage(passage, passage_id, query="", visualize=True, save_to_db=True, extract_oie=True):
+    """Xử lý một đoạn văn: phát hiện câu, nhúng, phân nhóm, CHẠY OIE, và lưu kết quả"""
     print(f"\n--- Đang xử lý passage {passage_id} ---")
     
-    # Tách câu
+    # Bước 1: Tách câu với phương pháp nâng cao
     sentences = to_sentences(passage)
     print(f"Đã tách thành {len(sentences)} câu")
     
     # Nếu không có câu nào, trả về kết quả rỗng
     if not sentences:
         print("Không có câu nào trong passage, bỏ qua")
-        return [], [], []
+        return [], [], [], []
     
-    # Tạo vector nhúng
+    # Bước 2: Tạo vector nhúng 
     vectors = to_vectors(sentences)
     
-    # Tạo ma trận 
+    # Bước 3: Tạo ma trận similarity
     sim_matrix = create_semantic_matrix(vectors)
     
-    # Phân tích phân bố relationship và đưa ra đề xuất threshold
+    # Bước 4: Phân tích phân bố relationship và đưa ra đề xuất threshold
     percentiles = analyze_similarity_distribution(sim_matrix, sentences)
     
-    # Yêu cầu người dùng chọn các tham số
+    # Bước 5: Yêu cầu người dùng chọn các tham số (thêm giá trị mặc định)
     while True:
         try:
-            initial_threshold = float(input("\nNhập threshold relationship ban đầu (0.0-1.0): "))
+            initial_threshold = float(input(f"\nNhập threshold relationship ban đầu (0.0-1.0, đề xuất: {percentiles['75%']:.4f}): ") or percentiles['75%'])
             if 0 <= initial_threshold <= 1:
                 break
             else:
@@ -361,7 +473,7 @@ def process_passage(passage, passage_id, query="", visualize=True, save_to_db=Tr
     
     while True:
         try:
-            decay_factor = float(input("Nhập hệ số giảm threshold (0.7-0.95): "))
+            decay_factor = float(input("Nhập hệ số giảm threshold (0.7-0.95, đề xuất: 0.9): ") or "0.9")
             if 0.7 <= decay_factor <= 0.95:
                 break
             else:
@@ -371,7 +483,7 @@ def process_passage(passage, passage_id, query="", visualize=True, save_to_db=Tr
     
     while True:
         try:
-            min_threshold = float(input("Nhập threshold tối thiểu (0.1-0.5): "))
+            min_threshold = float(input(f"Nhập threshold tối thiểu (0.1-0.5, đề xuất: {percentiles['25%']:.4f}): ") or percentiles['25%'])
             if 0.1 <= min_threshold <= 0.5:
                 break
             else:
@@ -379,11 +491,11 @@ def process_passage(passage, passage_id, query="", visualize=True, save_to_db=Tr
         except ValueError:
             print("Vui lòng nhập một số thực.")
     
-    # Phân nhóm câu với threshold giảm dần
+    # Bước 6: Phân nhóm câu với threshold giảm dần
     groups = semantic_spreading_grouping(sim_matrix, initial_threshold, decay_factor, min_threshold)
     print(f"Đã phân thành {len(groups)} nhóm ")
     
-    # Hiển thị kết quả
+    # Bước 7: Hiển thị các nhóm câu
     for i, group in enumerate(groups):
         group_sentences = [sentences[idx] for idx in group]
         print(f"\nNhóm {i+1} ({len(group)} câu):")
@@ -392,16 +504,60 @@ def process_passage(passage, passage_id, query="", visualize=True, save_to_db=Tr
         if len(group_sentences) > 3:
             print(f" - ... và {len(group_sentences)-3} câu khác")
     
-    # Trực quan hóa ma trận
+    # Bước 8: Trích xuất OIE triples (THÊM MỚI)
+    all_triples = []
+    sentence_triples = []
+    
+    if extract_oie:
+        print(f"[INFO] Đang trích xuất OpenIE triples từ {len(sentences)} câu...")
+        start_time = time.time()
+        
+        # Khởi tạo danh sách trống cho mỗi câu
+        sentence_triples = [[] for _ in range(len(sentences))]
+        
+        # Xử lý theo nhóm để có context tốt hơn
+        for group_idx, group in enumerate(groups):
+            print(f"  Đang trích xuất quan hệ cho nhóm {group_idx+1}/{len(groups)}...")
+            
+            # Trích xuất triples cho từng câu trong nhóm
+            for i, sentence_idx in enumerate(group):
+                sentence = sentences[sentence_idx]
+                
+                # Trích xuất triples từ câu
+                triples = extract_triples_for_search(sentence)
+                
+                # Lưu trữ triples
+                sentence_triples[sentence_idx] = triples
+                all_triples.extend(triples)
+        
+        elapsed_time = time.time() - start_time
+        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ trong {elapsed_time:.2f}s")
+    
+    # Bước 9: Hiển thị OIE triples theo nhóm (THÊM MỚI)
+    if extract_oie and all_triples:
+        display_oie_triples(groups, sentences, sentence_triples)
+    
+    # Bước 10: Trực quan hóa ma trận
     if visualize:
         visualize_similarity_matrix(sim_matrix, groups, 
-                                  title=f"Ma trận relationship  - Passage {passage_id}")
+                                  title=f"Ma trận similarity - Passage {passage_id}")
     
-    # Lưu kết quả vào database nếu được yêu cầu
+    # Bước 11: Lưu kết quả vào database
     if save_to_db:
-        save_to_database(query, passage, sentences, vectors, groups)
+        if extract_oie:
+            # Tạo cấu trúc OIE_Sentence_Groups 
+            oie_sentence_groups = []
+            for group in groups:
+                group_triples = []
+                for idx in group:
+                    group_triples.append(sentence_triples[idx])
+                oie_sentence_groups.append(group_triples)
+                
+            save_to_database_with_oie(query, passage, sentences, vectors, groups, all_triples, oie_sentence_groups)
+        else:
+            save_to_database(query, passage, sentences, vectors, groups)
     
-    return sentences, vectors, groups
+    return sentences, vectors, groups, all_triples
 
 def test_manual_passage():
     """Cho phép người dùng nhập passage và kiểm thử thuật toán mà không lưu vào database"""
@@ -473,11 +629,24 @@ def test_document():
     # Xử lý tài liệu nhưng không lưu vào database
     process_document(document, "Tài liệu thủ công", query=query, save_to_db=False)
 
-def process_document(document, document_id, query="", visualize=True, save_to_db=False):
-    """Xử lý một tài liệu: phát hiện câu, nhúng, phân nhóm và lưu kết quả"""
+def process_document(document, document_id, query="", visualize=True, save_to_db=False, extract_oie=True):
+    """
+    Xử lý một tài liệu: phát hiện câu, nhúng, phân nhóm, trích xuất OIE và lưu kết quả
+    
+    Args:
+        document: Văn bản cần xử lý
+        document_id: ID của tài liệu
+        query: Query hoặc mô tả tài liệu
+        visualize: Có trực quan hóa ma trận similarity hay không
+        save_to_db: Có lưu kết quả vào database hay không
+        extract_oie: Có trích xuất OIE triples hay không
+        
+    Returns:
+        dict: Kết quả xử lý bao gồm sentences, vectors, groups, và triples
+    """
     print(f"\n--- Đang xử lý tài liệu {document_id} ---")
     
-    # Tách câu
+    # Bước 1: Tách câu
     sentences = to_sentences(document)
     print(f"Đã tách thành {len(sentences)} câu")
     
@@ -486,19 +655,19 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
         print("Không có câu nào trong tài liệu, bỏ qua")
         return [], [], []
     
-    # Tạo vector nhúng
+    # Bước 2: Tạo vector nhúng
     vectors = to_vectors(sentences)
     
-    # Tạo ma trận 
+    # Bước 3: Tạo ma trận similarity
     sim_matrix = create_semantic_matrix(vectors)
     
-    # Phân tích phân bố relationship và đưa ra đề xuất threshold
+    # Bước 4: Phân tích phân bố relationship và đưa ra đề xuất threshold
     percentiles = analyze_similarity_distribution(sim_matrix, sentences)
     
-    # Yêu cầu người dùng chọn các tham số
+    # Bước 5: Yêu cầu người dùng chọn các tham số
     while True:
         try:
-            initial_threshold = float(input("\nNhập threshold relationship ban đầu (0.0-1.0): "))
+            initial_threshold = float(input(f"\nNhập threshold relationship ban đầu (0.0-1.0, đề xuất: {percentiles['75%']:.4f}): ") or percentiles['75%'])
             if 0 <= initial_threshold <= 1:
                 break
             else:
@@ -508,7 +677,7 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     
     while True:
         try:
-            decay_factor = float(input("Nhập hệ số giảm threshold (0.7-0.95): "))
+            decay_factor = float(input("Nhập hệ số giảm threshold (0.7-0.95, đề xuất: 0.9): ") or "0.9")
             if 0.7 <= decay_factor <= 0.95:
                 break
             else:
@@ -518,7 +687,7 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     
     while True:
         try:
-            min_threshold = float(input("Nhập threshold tối thiểu (0.1-0.5): "))
+            min_threshold = float(input(f"Nhập threshold tối thiểu (0.1-0.5, đề xuất: {percentiles['25%']:.4f}): ") or percentiles['25%'])
             if 0.1 <= min_threshold <= 0.5:
                 break
             else:
@@ -526,52 +695,128 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
         except ValueError:
             print("Vui lòng nhập một số thực.")
     
-    # Phân nhóm câu với threshold giảm dần
+    # Bước 6: Phân nhóm câu với threshold giảm dần
     groups = semantic_spreading_grouping(sim_matrix, initial_threshold, decay_factor, min_threshold)
     print(f"Đã phân thành {len(groups)} nhóm ")
     
-    # Hiển thị kết quả
+    # Bước 7: Hiển thị các nhóm câu
     for i, group in enumerate(groups):
         group_sentences = [sentences[idx] for idx in group]
         print(f"\nNhóm {i+1} ({len(group)} câu):")
-        
-        # Hiển thị các câu trong nhóm (giới hạn số câu hiển thị nếu quá nhiều)
-        max_display = min(5, len(group_sentences))
-        for s in group_sentences[:max_display]:
-            print(f" - {s[:80]}..." if len(s) > 80 else f" - {s}")
-        if len(group_sentences) > max_display:
-            print(f" - ... và {len(group_sentences)-max_display} câu khác")
+        for s in group_sentences[:3]:  # Hiển thị tối đa 3 câu đầu tiên
+            print(f" - {s[:100]}..." if len(s) > 100 else f" - {s}")
+        if len(group_sentences) > 3:
+            print(f" - ... và {len(group_sentences)-3} câu khác")
     
-    # Trực quan hóa ma trận
+    # Bước 8: Trích xuất OIE triples (THÊM MỚI)
+    all_triples = []
+    sentence_triples = []
+    
+    if extract_oie:
+        print(f"[INFO] Đang trích xuất OpenIE triples từ {len(sentences)} câu...")
+        start_time = time.time()
+        
+        # Khởi tạo danh sách trống cho mỗi câu
+        sentence_triples = [[] for _ in range(len(sentences))]
+        
+        # Xử lý theo nhóm để có context tốt hơn
+        for group_idx, group in enumerate(groups):
+            print(f"  Đang trích xuất quan hệ cho nhóm {group_idx+1}/{len(groups)}...")
+            
+            # Trích xuất triples cho từng câu trong nhóm
+            for i, sentence_idx in enumerate(group):
+                sentence = sentences[sentence_idx]
+                
+                # Trích xuất triples từ câu
+                triples = extract_triples_for_search(sentence)
+                
+                # Lưu trữ triples
+                sentence_triples[sentence_idx] = triples
+                all_triples.extend(triples)
+        
+        elapsed_time = time.time() - start_time
+        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ trong {elapsed_time:.2f}s")
+    
+    # Bước 9: Hiển thị OIE triples theo nhóm (THÊM MỚI)
+    if extract_oie and all_triples:
+        display_oie_triples(groups, sentences, sentence_triples)
+    
+    # Bước 10: Trực quan hóa ma trận
     if visualize:
         visualize_similarity_matrix(sim_matrix, groups, 
-                                  title=f"Ma trận relationship  - {document_id}")
+                                  title=f"Ma trận similarity - {document_id}")
     
-    # Xuất kết quả ra file để người dùng có thể tham khảo chi tiết
-    export_results_to_file(document, sentences, groups, document_id)
+    # Bước 11: Xuất kết quả ra file
+    export_results_to_file(document, sentences, groups, sentence_triples, document_id)
     
-    # Lưu kết quả vào database nếu được yêu cầu
+    # Bước 12: Lưu kết quả vào database nếu được yêu cầu
     if save_to_db:
-        save_to_database(query, document, sentences, vectors, groups)
+        if extract_oie:
+            # Tạo cấu trúc OIE_Sentence_Groups
+            oie_sentence_groups = []
+            for group in groups:
+                group_triples = []
+                for idx in group:
+                    group_triples.append(sentence_triples[idx])
+                oie_sentence_groups.append(group_triples)
+                
+            save_to_database_with_oie(query, document, sentences, vectors, groups, all_triples, oie_sentence_groups)
+        else:
+            save_to_database(query, document, sentences, vectors, groups)
     
-    return sentences, vectors, groups
+    return sentences, vectors, groups, all_triples
 
-def export_results_to_file(document, sentences, groups, document_id):
-    """Xuất kết quả phân nhóm ra file văn bản"""
+def export_results_to_file(document, sentences, groups, sentence_triples=None, document_id=None):
+    """
+    Xuất kết quả phân nhóm và OIE ra file văn bản
+    
+    Args:
+        document: Văn bản gốc
+        sentences: Danh sách các câu
+        groups: Các nhóm câu
+        sentence_triples: Danh sách triples theo từng câu (tùy chọn)
+        document_id: ID của tài liệu
+    """
+    if document_id is None:
+        document_id = f"document_{int(time.time())}"
+        
     filename = f"semantic_groups_{document_id.replace(' ','_')}.txt"
     try:
         with open(filename, 'w', encoding='utf-8') as f:
-            f.write(f"KẾT QUẢ PHÂN NHÓM \n")
+            f.write(f"KẾT QUẢ PHÂN NHÓM VÀ TRÍCH XUẤT QUAN HỆ (OIE)\n")
             f.write(f"Tài liệu: {document_id}\n")
             f.write(f"Thời gian: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
             f.write(f"Tổng số câu: {len(sentences)}\n")
-            f.write(f"Số nhóm : {len(groups)}\n\n")
+            f.write(f"Số nhóm: {len(groups)}\n\n")
+            
+            # Đếm tổng số triples nếu có
+            if sentence_triples:
+                total_triples = sum(len(triples) for triples in sentence_triples)
+                f.write(f"Tổng số quan hệ trích xuất: {total_triples}\n\n")
             
             for i, group in enumerate(groups):
-                f.write(f"NHÓM {i+1} ({len(group)} câu):\n")
+                f.write(f"=== NHÓM {i+1} ({len(group)} câu) ===\n")
+                
+                # Tính số triples trong nhóm nếu có
+                if sentence_triples:
+                    group_triples_count = sum(len(sentence_triples[idx]) for idx in group)
+                    f.write(f"Số quan hệ trong nhóm: {group_triples_count}\n\n")
+                
                 for idx in group:
                     f.write(f"[{idx}] {sentences[idx]}\n")
+                    
+                    # Ghi các triples của câu nếu có
+                    if sentence_triples:
+                        triples = sentence_triples[idx]
+                        if triples:
+                            f.write(f"  Quan hệ trích xuất ({len(triples)}):\n")
+                            for triple in triples:
+                                f.write(f"  - {triple['subject']} | {triple['relation']} | {triple['object']}\n")
+                        else:
+                            f.write("  Không có quan hệ được trích xuất\n")
+                    f.write("\n")
+                
                 f.write("\n")
         
         print(f"\nĐã xuất kết quả chi tiết ra file: {filename}")
