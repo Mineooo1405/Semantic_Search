@@ -1,0 +1,320 @@
+KẾT QUẢ CHIA VĂN BẢN THÀNH CHUNKS VÀ OIE
+Thời gian: 2025-04-23 02:04:49
+Văn bản: Manual_1745348663
+Kích thước văn bản: 4491 ký tự
+Số câu: 70
+Số chunk: 6
+Số quan hệ OIE: 94
+
+=== CHUNK 1 (956 ký tự) ===
+On top of a striking new exhibition hall in southern Paris, the world's largest urban rooftop farm has started to bear fruit. Strawberries that are small, intensely flavoured and resplendently red sprout abundantly from large plastic tubes. Peer inside and you see the tubes are completely hollow, the roots of dozens of strawberry plants dangling down inside them. From identical vertical tubes nearby burst row upon row of lettuces; near those are aromatic herbs, such as basil, sage and peppermint. Opposite, in narrow, horizontal trays packed not with soil but with coconut fibre, grow cherry tomatoes, shiny aubergines and brightly coloured chards. Pascal Hardy, an engineer and sustainable development consultant, began experimenting with vertical farming and aeroponic growing towers - as the soil-free plastic tubes are known - on his Paris apartment block roof five years ago. The urbarn rooftop space above the exhibition hall is somewhat bigger:
+
+Các câu trong chunk 1:
+  [0] On top of a striking new exhibition hall in southern Paris,
+  [1] the world's largest urban rooftop farm has started to bear fruit.
+  [2] Strawberries that are small,
+  [3] intensely flavoured and resplendently red sprout abundantly from large plastic tubes.
+  [4] Peer inside and you see the tubes are completely hollow,
+  [5] the roots of dozens of strawberry plants dangling down inside them.
+  [6] From identical vertical tubes nearby burst row upon row of lettuces;
+  [7] near those are aromatic herbs, such as basil, sage and peppermint.
+  [8] Opposite, in narrow,
+  [9] horizontal trays packed not with soil but with coconut fibre, grow cherry tomatoes,
+  [10] shiny aubergines and brightly coloured chards.
+  [11] Pascal Hardy, an engineer and sustainable development consultant,
+  [12] began experimenting with vertical farming and aeroponic growing towers - as the soil-free plastic tubes are known - on his Paris apartment block roof five years ago.
+  [13] The urbarn rooftop space above the exhibition hall is somewhat bigger:
+
+Các quan hệ OIE trong chunk 1:
+  Câu 0: On top of a striking new exhibition hall in southern Paris,
+    - striking new exhibition hall | is in | Paris
+  Câu 1: the world's largest urban rooftop farm has started to bear fruit.
+    - world 's largest rooftop farm | bear | fruit
+    - world 's rooftop farm | bear | fruit
+    - world 's urban rooftop farm | bear | fruit
+    - world | has | largest urban rooftop farm
+    - world 's largest urban rooftop farm | bear | fruit
+  Câu 2: Strawberries that are small,
+  Câu 3: intensely flavoured and resplendently red sprout abundantly from large plastic tubes.
+  Câu 4: Peer inside and you see the tubes are completely hollow,
+    - tubes | are | completely hollow
+    - tubes | are | hollow
+  Câu 5: the roots of dozens of strawberry plants dangling down inside them.
+  Câu 6: From identical vertical tubes nearby burst row upon row of lettuces;
+  Câu 7: near those are aromatic herbs, such as basil, sage and peppermint.
+  Câu 8: Opposite, in narrow,
+  Câu 9: horizontal trays packed not with soil but with coconut fibre, grow cherry tomatoes,
+  Câu 10: shiny aubergines and brightly coloured chards.
+  Câu 11: Pascal Hardy, an engineer and sustainable development consultant,
+  Câu 12: began experimenting with vertical farming and aeroponic growing towers - as the soil-free plastic tubes are known - on his Paris apartment block roof five years ago.
+  Câu 13: The urbarn rooftop space above the exhibition hall is somewhat bigger:
+    - urbarn rooftop space | is | bigger
+    - rooftop space | is | bigger
+
+==================================================
+
+=== CHUNK 2 (961 ký tự) ===
+The urbarn rooftop space above the exhibition hall is somewhat bigger: 14,000 square metres and almost exactly the size of a couple of football pitches. Already, the team of young urban farmers who tend it have picked,  in one day, 3,000 lettuces and 150 punnets of strawberries. When the remaining two thirds of the vast open area are in production, 20 staff will harvest up to 1,000 kg of perhaps 35 different varieties of fruit and vegetables, every day. 'We're not ever, obviously, going to feed the whole city this way,' cautions Hardy. 'In the urban environment you're working with very significant practical constraints, clearly, on what you can do and where. But if enough unused space can be developed like this, there's no reason why you shouldn't eventually target maybe between 5% and 10% of consumption.' Perhaps most significantly, however, this is a real-life showcase for the work of Hardy's flourishing urban agriculture consultancy, Agripolis,
+
+Các câu trong chunk 2:
+  [13] The urbarn rooftop space above the exhibition hall is somewhat bigger:
+  [14] 14,000 square metres and almost exactly the size of a couple of football pitches.
+  [15] Already, the team of young urban farmers who tend it have picked,  in one day,
+  [16] 3,000 lettuces and 150 punnets of strawberries.
+  [17] When the remaining two thirds of the vast open area are in production,
+  [18] 20 staff will harvest up to 1,000 kg of perhaps 35 different varieties of fruit and vegetables, every day.
+  [19] 'We're not ever, obviously,
+  [20] going to feed the whole city this way,' cautions Hardy.
+  [21] 'In the urban environment you're working with very significant practical constraints, clearly,
+  [22] on what you can do and where.
+  [23] But if enough unused space can be developed like this,
+  [24] there's no reason why you shouldn't eventually target maybe between 5% and 10% of consumption.'
+  [25] Perhaps most significantly, however,
+  [26] this is a real-life showcase for the work of Hardy's flourishing urban agriculture consultancy, Agripolis,
+
+Các quan hệ OIE trong chunk 2:
+  Câu 13: The urbarn rooftop space above the exhibition hall is somewhat bigger:
+    - urbarn rooftop space | is | bigger
+    - rooftop space | is | bigger
+  Câu 14: 14,000 square metres and almost exactly the size of a couple of football pitches.
+  Câu 15: Already, the team of young urban farmers who tend it have picked,  in one day,
+  Câu 16: 3,000 lettuces and 150 punnets of strawberries.
+  Câu 17: When the remaining two thirds of the vast open area are in production,
+    - vast open area | remaining thirds of are | When production
+    - vast open area | remaining thirds of are | production
+    - vast open area | thirds of are | production
+    - vast open area | thirds of are | When production
+  Câu 18: 20 staff will harvest up to 1,000 kg of perhaps 35 different varieties of fruit and vegetables, every day.
+  Câu 19: 'We're not ever, obviously,
+  Câu 20: going to feed the whole city this way,' cautions Hardy.
+  Câu 21: 'In the urban environment you're working with very significant practical constraints, clearly,
+  Câu 22: on what you can do and where.
+  Câu 23: But if enough unused space can be developed like this,
+  Câu 24: there's no reason why you shouldn't eventually target maybe between 5% and 10% of consumption.'
+  Câu 25: Perhaps most significantly, however,
+  Câu 26: this is a real-life showcase for the work of Hardy's flourishing urban agriculture consultancy, Agripolis,
+
+==================================================
+
+=== CHUNK 3 (985 ký tự) ===
+Perhaps most significantly, however, this is a real-life showcase for the work of Hardy's flourishing urban agriculture consultancy, Agripolis, which is currently fielding enquiries from around the world to design, build and equip a new breed of soil-free inner-city farm. 'The method's advantages are many,' he says. 'First, I don't much like the fact that most of the fruit and vegetables we eat have been treated with something like 17 different pesticides, or that the intensive farming techniques that produced them are such huge generators of greenhouse gases. I don't much like the fact, either, that they've travelled an average of 2,000 refrigerated kilometres to my plate, that their quality is so poor, because the varieties are selected for their capacity to withstand such substantial journeys, or that 80% of the price I pay goes to wholesalers and transport companies, not the producers.' Produce grown using this soil-free method, on the other hand is 'produced up here
+
+Các câu trong chunk 3:
+  [25] Perhaps most significantly, however,
+  [26] this is a real-life showcase for the work of Hardy's flourishing urban agriculture consultancy, Agripolis,
+  [27] which is currently fielding enquiries from around the world to design,
+  [28] build and equip a new breed of soil-free inner-city farm.
+  [29] 'The method's advantages are many,' he says.
+  [30] 'First, I don't much like the fact that most of the fruit and vegetables we eat have been treated with something like 17 different pesticides,
+  [31] or that the intensive farming techniques that produced them are such huge generators of greenhouse gases.
+  [32] I don't much like the fact, either,
+  [33] that they've travelled an average of 2,000 refrigerated kilometres to my plate,
+  [34] that their quality is so poor,
+  [35] because the varieties are selected for their capacity to withstand such substantial journeys,
+  [36] or that 80% of the price I pay goes to wholesalers and transport companies, not the producers.'
+  [37] Produce grown using this soil-free method,
+  [38] on the other hand is 'produced up here
+
+Các quan hệ OIE trong chunk 3:
+  Câu 25: Perhaps most significantly, however,
+  Câu 26: this is a real-life showcase for the work of Hardy's flourishing urban agriculture consultancy, Agripolis,
+  Câu 27: which is currently fielding enquiries from around the world to design,
+  Câu 28: build and equip a new breed of soil-free inner-city farm.
+  Câu 29: 'The method's advantages are many,' he says.
+    - method | has | advantages
+  Câu 30: 'First, I don't much like the fact that most of the fruit and vegetables we eat have been treated with something like 17 different pesticides,
+  Câu 31: or that the intensive farming techniques that produced them are such huge generators of greenhouse gases.
+  Câu 32: I don't much like the fact, either,
+    - I | do much either like | fact
+  Câu 33: that they've travelled an average of 2,000 refrigerated kilometres to my plate,
+    - they | 've travelled | average
+    - they | 've travelled | average of 2,000 kilometres
+    - they | 've travelled | average of 2,000 refrigerated kilometres
+  Câu 34: that their quality is so poor,
+    - their quality | is | poor
+    - their quality | is | so poor
+    - their quality | is | that so poor
+  Câu 35: because the varieties are selected for their capacity to withstand such substantial journeys,
+    - varieties | are | because selected
+    - varieties capacity | withstand | journeys
+    - varieties capacity | withstand | such journeys
+    - the varieties capacity | withstand | such substantial journeys
+    - varieties | are | selected
+    - varieties capacity | withstand | such substantial journeys
+  Câu 36: or that 80% of the price I pay goes to wholesalers and transport companies, not the producers.'
+    - I | pay | goes
+    - I | pay to | wholesalers
+  Câu 37: Produce grown using this soil-free method,
+  Câu 38: on the other hand is 'produced up here
+
+==================================================
+
+=== CHUNK 4 (988 ký tự) ===
+or that 80% of the price I pay goes to wholesalers and transport companies, not the producers.' Produce grown using this soil-free method, on the other hand is 'produced up here and sold locally, just down there. which relies solely on a small quantity of water, enriched with organic nutrients, pumped around a closed circuit of pipes, towers and trays It barely travels at all,' Hardy says. 'You can select crop varieties for their flavour, not their resistance to the transport and storage chain, and you can pick them when they're really at their best and not before.' No soil is exhausted, and the water that gently showers the plants' roots every 12 minutes is recycled, so the method uses 90% less water than a classic intensive farm for the same yield. Urban farming is not, of course, a new phenomenon. Inner-city agriculture is booming from Shanghai to Detroit and Tokyo to Bangkok. Strawberries are being grown in disused shipping containers, mushrooms in underground carparks.
+
+Các câu trong chunk 4:
+  [36] or that 80% of the price I pay goes to wholesalers and transport companies, not the producers.'
+  [37] Produce grown using this soil-free method,
+  [38] on the other hand is 'produced up here
+  [39] and sold locally, just down there.
+  [40] which relies solely on a small quantity of water,
+  [41] enriched with organic nutrients,
+  [42] pumped around a closed circuit of pipes, towers and trays
+  [43] It barely travels at all,' Hardy says.
+  [44] 'You can select crop varieties for their flavour,
+  [45] not their resistance to the transport and storage chain,
+  [46] and you can pick them when they're really at their best
+  [47] and not before.'
+  [48] No soil is exhausted,
+  [49] and the water that gently showers the plants' roots every 12 minutes is recycled,
+  [50] so the method uses 90% less water than a classic intensive farm for the same yield.
+  [51] Urban farming is not, of course, a new phenomenon.
+  [52] Inner-city agriculture is booming from Shanghai to Detroit and Tokyo to Bangkok.
+  [53] Strawberries are being grown in disused shipping containers, mushrooms in underground carparks.
+
+Các quan hệ OIE trong chunk 4:
+  Câu 36: or that 80% of the price I pay goes to wholesalers and transport companies, not the producers.'
+    - I | pay | goes
+    - I | pay to | wholesalers
+  Câu 37: Produce grown using this soil-free method,
+  Câu 38: on the other hand is 'produced up here
+  Câu 39: and sold locally, just down there.
+  Câu 40: which relies solely on a small quantity of water,
+  Câu 41: enriched with organic nutrients,
+  Câu 42: pumped around a closed circuit of pipes, towers and trays
+  Câu 43: It barely travels at all,' Hardy says.
+    - It | barely travels at | all
+    - It | travels at | all
+  Câu 44: 'You can select crop varieties for their flavour,
+    - You | can select | crop varieties for their flavour
+    - You | can select | crop varieties
+  Câu 45: not their resistance to the transport and storage chain,
+  Câu 46: and you can pick them when they're really at their best
+    - them | 're at | when them best
+    - them | 're at | them best
+    - you | can pick at | when really them best
+    - them | 're at | really them best
+    - you | can pick at | them best
+    - you | can pick at | when them best
+    - them | 're at | when really them best
+    - you | can pick | them
+  Câu 47: and not before.'
+  Câu 48: No soil is exhausted,
+  Câu 49: and the water that gently showers the plants' roots every 12 minutes is recycled,
+    - 12 minutes | is | recycled
+    - 12 minutes | gently showers | plants ' roots
+    - 12 minutes | showers | plants ' roots
+  Câu 50: so the method uses 90% less water than a classic intensive farm for the same yield.
+    - method | so uses | water
+    - method | so uses | 90 % less water than classic intensive farm
+    - method | uses | water
+    - method | so uses | 90 % less water
+  Câu 51: Urban farming is not, of course, a new phenomenon.
+    - Urban farming | is new phenomenon of | course
+  Câu 52: Inner-city agriculture is booming from Shanghai to Detroit and Tokyo to Bangkok.
+    - city agriculture | is booming from | Shanghai
+    - Inner city agriculture | is booming from | Shanghai
+  Câu 53: Strawberries are being grown in disused shipping containers, mushrooms in underground carparks.
+    - Strawberries | are grown in | mushrooms in underground carparks
+    - disused shipping containers | mushrooms in | underground carparks
+    - Strawberries | are grown in | mushrooms
+    - Strawberries | are grown in | disused shipping containers
+    - Strawberries | are grown in | shipping containers
+    - mushrooms | is in | underground carparks
+    - Strawberries | are | are grown
+
+==================================================
+
+=== CHUNK 5 (989 ký tự) ===
+Inner-city agriculture is booming from Shanghai to Detroit and Tokyo to Bangkok. Strawberries are being grown in disused shipping containers, mushrooms in underground carparks. Aeroponic farming, he says, is 'virtuous'. The equipment weighs little, can be installed on almost any flat surface and is cheap to buy: roughly €100 to €150 per square metre. It is cheap to run, too, consuming a tiny fraction of the electricity used by some techniques. Produce grown this way typically sells at prices that, while generally higher than those of classic intensive agriculture, are lower than soil-based organic growers. There are limits to what farmers can grow this way, of course, and much of the produce is suited to the summer months. 'Root vegetables we cannot do, at least not yet,' he says. 'Radishes are OK, but carrots,  potatoes, that kind of thing - the roots are simply too long. Fruit trees are obviously not an option. And beans tend to take up a lot of space for not much return.'
+
+Các câu trong chunk 5:
+  [52] Inner-city agriculture is booming from Shanghai to Detroit and Tokyo to Bangkok.
+  [53] Strawberries are being grown in disused shipping containers, mushrooms in underground carparks.
+  [54] Aeroponic farming, he says, is 'virtuous'.
+  [55] The equipment weighs little, can be installed on almost any flat surface and is cheap to buy:
+  [56] roughly €100 to €150 per square metre.
+  [57] It is cheap to run, too,
+  [58] consuming a tiny fraction of the electricity used by some techniques.
+  [59] Produce grown this way typically sells at prices that,
+  [60] while generally higher than those of classic intensive agriculture,
+  [61] are lower than soil-based organic growers.
+  [62] There are limits to what farmers can grow this way, of course,
+  [63] and much of the produce is suited to the summer months.
+  [64] 'Root vegetables we cannot do, at least not yet,' he says.
+  [65] 'Radishes are OK, but carrots,  potatoes,
+  [66] that kind of thing - the roots are simply too long.
+  [67] Fruit trees are obviously not an option.
+  [68] And beans tend to take up a lot of space for not much return.'
+
+Các quan hệ OIE trong chunk 5:
+  Câu 52: Inner-city agriculture is booming from Shanghai to Detroit and Tokyo to Bangkok.
+    - city agriculture | is booming from | Shanghai
+    - Inner city agriculture | is booming from | Shanghai
+  Câu 53: Strawberries are being grown in disused shipping containers, mushrooms in underground carparks.
+    - Strawberries | are grown in | mushrooms in underground carparks
+    - disused shipping containers | mushrooms in | underground carparks
+    - Strawberries | are grown in | mushrooms
+    - Strawberries | are grown in | disused shipping containers
+    - Strawberries | are grown in | shipping containers
+    - mushrooms | is in | underground carparks
+    - Strawberries | are | are grown
+  Câu 54: Aeroponic farming, he says, is 'virtuous'.
+    - farming | is | virtuous
+    - Aeroponic farming | is | virtuous
+  Câu 55: The equipment weighs little, can be installed on almost any flat surface and is cheap to buy:
+    - little | be installed on | almost flat surface
+    - little | be installed on | flat surface
+    - equipment | weighs | little
+  Câu 56: roughly €100 to €150 per square metre.
+  Câu 57: It is cheap to run, too,
+    - It | cheap | run too
+    - It | cheap | to run too
+    - It | cheap | run
+    - It | is | cheap
+    - It | cheap | to run
+  Câu 58: consuming a tiny fraction of the electricity used by some techniques.
+  Câu 59: Produce grown this way typically sells at prices that,
+    - way | typically sells at | prices
+    - way | sells at | prices
+  Câu 60: while generally higher than those of classic intensive agriculture,
+  Câu 61: are lower than soil-based organic growers.
+  Câu 62: There are limits to what farmers can grow this way, of course,
+  Câu 63: and much of the produce is suited to the summer months.
+    - much | is | suited
+  Câu 64: 'Root vegetables we cannot do, at least not yet,' he says.
+  Câu 65: 'Radishes are OK, but carrots,  potatoes,
+    - Radishes | are | OK
+  Câu 66: that kind of thing - the roots are simply too long.
+    - kind | are | simply long
+    - kind | are | long
+  Câu 67: Fruit trees are obviously not an option.
+  Câu 68: And beans tend to take up a lot of space for not much return.'
+
+==================================================
+
+=== CHUNK 6 (366 ký tự) ===
+'Radishes are OK, but carrots,  potatoes, that kind of thing - the roots are simply too long. Fruit trees are obviously not an option. And beans tend to take up a lot of space for not much return.' Nevertheless, urban farming of the kind being practised in Paris is one part of a bigger and fast-changing picture that is bringing food production closer to our lives.
+
+Các câu trong chunk 6:
+  [65] 'Radishes are OK, but carrots,  potatoes,
+  [66] that kind of thing - the roots are simply too long.
+  [67] Fruit trees are obviously not an option.
+  [68] And beans tend to take up a lot of space for not much return.'
+  [69] Nevertheless, urban farming of the kind being practised in Paris is one part of a bigger and fast-changing picture that is bringing food production closer to our lives.
+
+Các quan hệ OIE trong chunk 6:
+  Câu 65: 'Radishes are OK, but carrots,  potatoes,
+    - Radishes | are | OK
+  Câu 66: that kind of thing - the roots are simply too long.
+    - kind | are | simply long
+    - kind | are | long
+  Câu 67: Fruit trees are obviously not an option.
+  Câu 68: And beans tend to take up a lot of space for not much return.'
+  Câu 69: Nevertheless, urban farming of the kind being practised in Paris is one part of a bigger and fast-changing picture that is bringing food production closer to our lives.
+    - farming | is | Nevertheless one part
+    - urban farming | is | Nevertheless one part
+    - farming | is | one part
+
+==================================================
+

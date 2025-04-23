@@ -6,7 +6,7 @@ import json
 import pandas as pd
 from typing import List, Dict, Union, Optional, Callable
 from dotenv import load_dotenv
-from Tool.Sentence_Detector import sentence_detector
+from Tool.Sentence_Detector import sentence_detector, enhanced_sentence_detector, sentence_splitter_for_oie, spacy_sentence_splitter
 from Tool.Database import connect_to_db
 from Tool.OIE import extract_triples_for_search
 
@@ -18,7 +18,20 @@ except LookupError:
 load_dotenv()
 
 def to_sentences(passage):
-    return sentence_detector(passage)
+    """
+    Tách đoạn văn thành các câu riêng biệt tối ưu cho OIE
+    
+    Args:
+        passage: Đoạn văn bản cần tách câu
+        
+    Returns:
+        list: Danh sách các câu đã được chia nhỏ
+    """
+    # Lấy ra câu đã chia nhỏ (phần tử thứ 2 của tuple)
+    _, sub_sentences = spacy_sentence_splitter(passage)
+    return sub_sentences
+
+
 
 def calculate_chunk_stats(chunks):
     stats = {
