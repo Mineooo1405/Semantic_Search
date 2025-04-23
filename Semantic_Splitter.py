@@ -601,6 +601,47 @@ def test_document():
     # Xử lý tài liệu nhưng không lưu vào database
     process_document(document, "Tài liệu thủ công", query=query, save_to_db=False)
     
+def process_oie_in_groups(sentences, groups):
+    """
+    Trích xuất OpenIE triples cho tất cả các câu trong các nhóm
+    
+    Args:
+        sentences: Danh sách các câu
+        groups: Danh sách các nhóm, mỗi nhóm chứa các chỉ số của câu
+        
+    Returns:
+        tuple: (all_triples, sentence_triples)
+            - all_triples: Danh sách tất cả các triples đã trích xuất
+            - sentence_triples: Danh sách các triples theo từng câu
+    """
+    print("\nĐang trích xuất quan hệ (OpenIE) cho các câu...")
+    
+    all_triples = []
+    sentence_triples = [[] for _ in range(len(sentences))]  # Danh sách trống cho mỗi câu
+    
+    # Hiển thị tiến độ
+    start_time = time.time()
+    
+    # Xử lý theo nhóm để có context tốt hơn
+    for group_idx, group in enumerate(groups):
+        print(f"  Đang trích xuất quan hệ cho nhóm {group_idx+1}/{len(groups)}...")
+        
+        # Trích xuất triples cho từng câu trong nhóm
+        for i, sentence_idx in enumerate(group):
+            sentence = sentences[sentence_idx]
+            
+            # Trích xuất triples từ câu
+            triples = extract_triples_for_search(sentence)
+            
+            # Lưu trữ triples
+            sentence_triples[sentence_idx] = triples
+            all_triples.extend(triples)
+    
+    elapsed_time = time.time() - start_time
+    print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ trong {elapsed_time:.2f}s")
+    
+    return all_triples, sentence_triples
+    
 def process_document(document, document_id, query="", visualize=True, save_to_db=True, extract_oie=True):
     """
     Xử lý một tài liệu/đoạn văn: phát hiện câu, nhúng, phân nhóm, trích xuất OIE và lưu kết quả
@@ -658,31 +699,10 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     # Bước 8: Trích xuất OIE triples
     all_triples = []
     sentence_triples = []
-    
+
     if extract_oie:
-        print(f"[INFO] Đang trích xuất OpenIE triples từ {len(sentences)} câu...")
-        start_time = time.time()
-        
-        # Khởi tạo danh sách trống cho mỗi câu
-        sentence_triples = [[] for _ in range(len(sentences))]
-        
-        # Xử lý theo nhóm để có context tốt hơn
-        for group_idx, group in enumerate(groups):
-            print(f"  Đang trích xuất quan hệ cho nhóm {group_idx+1}/{len(groups)}...")
-            
-            # Trích xuất triples cho từng câu trong nhóm
-            for i, sentence_idx in enumerate(group):
-                sentence = sentences[sentence_idx]
-                
-                # Trích xuất triples từ câu
-                triples = extract_triples_for_search(sentence)
-                
-                # Lưu trữ triples
-                sentence_triples[sentence_idx] = triples
-                all_triples.extend(triples)
-        
-        elapsed_time = time.time() - start_time
-        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ trong {elapsed_time:.2f}s")
+        all_triples, sentence_triples = process_oie_in_groups(sentences, groups)
+        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ")
     
     # Bước 9: Hiển thị OIE triples theo nhóm
     if extract_oie and all_triples:
@@ -713,6 +733,31 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     
     return sentences, vectors, groups, all_triples
 
+def generate_output_filename(document_id=None, prefix="semantic", suffix=".txt"):
+    """
+    Tạo tên file chuẩn hóa và nhất quán cho các kết quả xuất ra
+    
+    Args:
+        document_id: ID của tài liệu (có thể None)
+        prefix: Tiền tố xác định loại phân tích ("grouping", "splitter")
+        suffix: Hậu tố file (.txt, .json, etc.)
+        
+    Returns:
+        str: Tên file đã được chuẩn hóa với timestamp
+    """
+    # Chuẩn hóa document_id
+    if document_id is None:
+        document_id = f"doc_{int(time.time())}"
+    
+    # Làm sạch document_id, loại bỏ các ký tự không hợp lệ
+    safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', str(document_id).replace(' ', '_'))
+    
+    # Thêm thông tin thời gian
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    
+    # Tạo tên file với định dạng nhất quán
+    return f"{prefix}_{safe_id}_{timestamp}{suffix}"
+
 def export_results_to_file(document, sentences, groups, sentence_triples, document_id):
     """
     Xuất kết quả phân nhóm và OIE ra file văn bản
@@ -735,7 +780,7 @@ def export_results_to_file(document, sentences, groups, sentence_triples, docume
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     
     # Tạo tên file với nhiều thông tin hơn
-    filename = f"splitter_{safe_id}_{timestamp}.txt"
+    filename = generate_output_filename(document_id, prefix="splitter")
     
     try:
         with open(filename, 'w', encoding='utf-8') as f:

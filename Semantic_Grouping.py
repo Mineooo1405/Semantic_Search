@@ -12,6 +12,7 @@ import seaborn as sns
 import time
 import pickle
 import spacy
+import re
 
 load_dotenv()
 
@@ -610,6 +611,31 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     
     return sentences, vectors, groups, all_triples
 
+def generate_output_filename(document_id=None, prefix="semantic", suffix=".txt"):
+    """
+    Tạo tên file chuẩn hóa và nhất quán cho các kết quả xuất ra
+    
+    Args:
+        document_id: ID của tài liệu (có thể None)
+        prefix: Tiền tố xác định loại phân tích ("grouping", "splitter")
+        suffix: Hậu tố file (.txt, .json, etc.)
+        
+    Returns:
+        str: Tên file đã được chuẩn hóa với timestamp
+    """
+    # Chuẩn hóa document_id
+    if document_id is None:
+        document_id = f"doc_{int(time.time())}"
+    
+    # Làm sạch document_id, loại bỏ các ký tự không hợp lệ
+    safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', str(document_id).replace(' ', '_'))
+    
+    # Thêm thông tin thời gian
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    
+    # Tạo tên file với định dạng nhất quán
+    return f"{prefix}_{safe_id}_{timestamp}{suffix}"
+
 def export_results_to_file(document, sentences, groups, sentence_triples=None, document_id=None):
     """
     Xuất kết quả phân nhóm và OIE ra file văn bản
@@ -624,7 +650,7 @@ def export_results_to_file(document, sentences, groups, sentence_triples=None, d
     if document_id is None:
         document_id = f"document_{int(time.time())}"
         
-    filename = f"Semantic_Grouping_{document_id.replace(' ','_')}.txt"
+    filename = generate_output_filename(document_id, prefix="grouping")
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             f.write(f"KẾT QUẢ PHÂN NHÓM VÀ TRÍCH XUẤT QUAN HỆ (OIE)\n")

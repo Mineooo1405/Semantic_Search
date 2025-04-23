@@ -844,9 +844,24 @@ if __name__ == "__main__":
     print("\nCombined sentences:")
     for i, s in enumerate(combined_sentences):
         print(f"{i+1}. {s}")
+        
+    print("\n=== NHẬP TÀI LIỆU TRỰC TIẾP ===")
+    print("Nhập nội dung tài liệu (kết thúc bằng một dòng chỉ có '###'):")
+    lines = []
+    while True:
+        line = input()
+        if line == '###':
+            break
+        lines.append(line)
+        
+    if not lines:
+        print("Không có nội dung được nhập, hủy phân tích.")
+        exit()
+        
+    document = "\n".join(lines)
     
     # Test với một ví dụ phức tạp hơn
-    complex_text = "The equipment weighs little, can be installed on almost any flat surface, and doesn't depend on a supply of electricity. Instead it is powered by the process that produced it: the natural growth of plants. Hardy's company, Agripolis, has installed systems at 75 different Parisian sites, reducing the distance food travels to reach the city's markets and restaurants."
+    complex_text = document
     
     print("\n=== Test Complex Example ===")
     complex_sentences = to_sentences(complex_text)
