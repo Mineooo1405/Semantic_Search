@@ -15,6 +15,45 @@ import spacy
 
 load_dotenv()
 
+def process_oie_in_groups(sentences, groups):
+    """
+    Trích xuất OpenIE triples cho tất cả các câu trong các nhóm
+    
+    Args:
+        sentences: Danh sách các câu
+        groups: Danh sách các nhóm, mỗi nhóm chứa các chỉ số của câu
+        
+    Returns:
+        tuple: (all_triples, sentence_triples)
+            - all_triples: Danh sách tất cả các triples đã trích xuất
+            - sentence_triples: Danh sách các triples theo từng câu
+    """
+    print("\nĐang trích xuất quan hệ (OpenIE) cho các câu...")
+    
+    all_triples = []
+    sentence_triples = [[] for _ in range(len(sentences))]  # Danh sách triples cho mỗi câu
+    
+    # Hiển thị tiến độ
+    total = len(sentences)
+    start_time = time.time()
+    
+    for i, sentence in enumerate(sentences):
+        if i % 5 == 0 or i == total - 1:
+            elapsed = time.time() - start_time
+            eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
+            print(f"Trích xuất quan hệ: [{i+1}/{total}] - {(i+1)/total*100:.1f}% - ETA: {eta:.1f}s", end="\r")
+        
+        # Trích xuất triples cho câu
+        triples = extract_triples_for_search(sentence)
+        
+        # Lưu trữ triples
+        sentence_triples[i] = triples
+        all_triples.extend(triples)
+    
+    print(f"\nĐã trích xuất tổng cộng {len(all_triples)} quan hệ từ {total} câu")
+    
+    return all_triples, sentence_triples
+
 def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
     cache_file = f"{cache_prefix}{hash(str(sentences))}.pkl"
     
@@ -412,8 +451,9 @@ def process_passage(passage, passage_id, query="", visualize=True, save_to_db=Tr
     print(f"\n--- Đang xử lý passage {passage_id} ---")
     
     # Bước 1: Tách câu với phương pháp nâng cao
-    sentences = to_sentences(passage)
-    print(f"Đã tách thành {len(sentences)} câu")
+    sentences = to_sentences(passage, use_enhanced=True, use_spacy=True, min_words=3)
+    print(f"Đã tách thành {len(sentences)} câu tối ưu cho OIE")
+    
     
     # Nếu không có câu nào, trả về kết quả rỗng
     if not sentences:
@@ -474,33 +514,9 @@ def process_passage(passage, passage_id, query="", visualize=True, save_to_db=Tr
             print(f" - ... và {len(group_sentences)-3} câu khác")
     
     # Bước 8: Trích xuất OIE triples (THÊM MỚI)
-    all_triples = []
-    sentence_triples = []
-    
     if extract_oie:
-        print(f"[INFO] Đang trích xuất OpenIE triples từ {len(sentences)} câu...")
-        start_time = time.time()
-        
-        # Khởi tạo danh sách trống cho mỗi câu
-        sentence_triples = [[] for _ in range(len(sentences))]
-        
-        # Xử lý theo nhóm để có context tốt hơn
-        for group_idx, group in enumerate(groups):
-            print(f"  Đang trích xuất quan hệ cho nhóm {group_idx+1}/{len(groups)}...")
-            
-            # Trích xuất triples cho từng câu trong nhóm
-            for i, sentence_idx in enumerate(group):
-                sentence = sentences[sentence_idx]
-                
-                # Trích xuất triples từ câu
-                triples = extract_triples_for_search(sentence)
-                
-                # Lưu trữ triples
-                sentence_triples[sentence_idx] = triples
-                all_triples.extend(triples)
-        
-        elapsed_time = time.time() - start_time
-        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ trong {elapsed_time:.2f}s")
+        all_triples, sentence_triples = process_oie_in_groups(sentences, groups)
+        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ chất lượng cao")
     
     # Bước 9: Hiển thị OIE triples theo nhóm (THÊM MỚI)
     if extract_oie and all_triples:
@@ -598,31 +614,31 @@ def test_document():
     # Xử lý tài liệu nhưng không lưu vào database
     process_document(document, "Tài liệu thủ công", query=query, save_to_db=False)
 
-def process_document(document, document_id, query="", visualize=True, save_to_db=False, extract_oie=True):
+def process_document(document, document_id, query="", visualize=True, save_to_db=True, extract_oie=True):
     """
-    Xử lý một tài liệu: phát hiện câu, nhúng, phân nhóm, trích xuất OIE và lưu kết quả
+    Xử lý một tài liệu/đoạn văn: phát hiện câu, nhúng, phân nhóm, trích xuất OIE và lưu kết quả
     
     Args:
         document: Văn bản cần xử lý
-        document_id: ID của tài liệu
-        query: Query hoặc mô tả tài liệu
+        document_id: ID của tài liệu/đoạn văn
+        query: Query hoặc mô tả
         visualize: Có trực quan hóa ma trận similarity hay không
         save_to_db: Có lưu kết quả vào database hay không
         extract_oie: Có trích xuất OIE triples hay không
         
     Returns:
-        dict: Kết quả xử lý bao gồm sentences, vectors, groups, và triples
+        tuple: (sentences, vectors, groups, all_triples)
     """
-    print(f"\n--- Đang xử lý tài liệu {document_id} ---")
+    print(f"\n--- Đang xử lý {document_id} ---")
     
     # Bước 1: Tách câu
-    sentences = to_sentences(document)
-    print(f"Đã tách thành {len(sentences)} câu")
+    sentences = to_sentences(document, use_enhanced=True, use_spacy=True, min_words=3)
+    print(f"Đã tách thành {len(sentences)} câu tối ưu cho OIE")
     
     # Nếu không có câu nào, trả về kết quả rỗng
     if not sentences:
-        print("Không có câu nào trong tài liệu, bỏ qua")
-        return [], [], []
+        print("Không có câu nào trong văn bản, bỏ qua")
+        return [], [], [], []
     
     # Bước 2: Tạo vector nhúng
     vectors = to_vectors(sentences)
@@ -677,36 +693,15 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
         if len(group_sentences) > 3:
             print(f" - ... và {len(group_sentences)-3} câu khác")
     
-    # Bước 8: Trích xuất OIE triples (THÊM MỚI)
+    # Bước 8: Trích xuất OIE triples
     all_triples = []
     sentence_triples = []
     
     if extract_oie:
-        print(f"[INFO] Đang trích xuất OpenIE triples từ {len(sentences)} câu...")
-        start_time = time.time()
-        
-        # Khởi tạo danh sách trống cho mỗi câu
-        sentence_triples = [[] for _ in range(len(sentences))]
-        
-        # Xử lý theo nhóm để có context tốt hơn
-        for group_idx, group in enumerate(groups):
-            print(f"  Đang trích xuất quan hệ cho nhóm {group_idx+1}/{len(groups)}...")
-            
-            # Trích xuất triples cho từng câu trong nhóm
-            for i, sentence_idx in enumerate(group):
-                sentence = sentences[sentence_idx]
-                
-                # Trích xuất triples từ câu
-                triples = extract_triples_for_search(sentence)
-                
-                # Lưu trữ triples
-                sentence_triples[sentence_idx] = triples
-                all_triples.extend(triples)
-        
-        elapsed_time = time.time() - start_time
-        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ trong {elapsed_time:.2f}s")
+        all_triples, sentence_triples = process_oie_in_groups(sentences, groups)
+        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ")
     
-    # Bước 9: Hiển thị OIE triples theo nhóm (THÊM MỚI)
+    # Bước 9: Hiển thị OIE triples theo nhóm
     if extract_oie and all_triples:
         display_oie_triples(groups, sentences, sentence_triples)
     
@@ -794,9 +789,10 @@ def export_results_to_file(document, sentences, groups, sentence_triples=None, d
 
 if __name__ == "__main__":
     print("1. Xử lý passages từ tập dữ liệu")
-    print("2. Phân tích tài liệu tự nhập hoặc từ file")
+    print("2. Phân tích tài liệu tự nhập")
+    print("3. Phân tích tài liệu từ file")
     
-    choice = input("\nLựa chọn của bạn (1/2): ")
+    choice = input("\nLựa chọn của bạn (1/2/3): ")
     
     if choice == '1':
         # Đọc dataset
@@ -818,10 +814,48 @@ if __name__ == "__main__":
         passages_to_process = passages[:min(num_passages, len(passages))]
         
         for i, passage in enumerate(passages_to_process):
-            process_passage(passage, i+1, query=f"Query for passage {i+1}")
+            process_document(passage, f"Passage {i+1}", query=f"Query for passage {i+1}")
     
     elif choice == '2':
-        test_document()
+        # Nhập tài liệu trực tiếp
+        print("\n=== NHẬP TÀI LIỆU TRỰC TIẾP ===")
+        print("Nhập nội dung tài liệu (kết thúc bằng một dòng chỉ có '###'):")
+        lines = []
+        while True:
+            line = input()
+            if line == '###':
+                break
+            lines.append(line)
+        
+        if not lines:
+            print("Không có nội dung được nhập, hủy phân tích.")
+            exit()
+        
+        document = "\n".join(lines)
+        query = input("Nhập query hoặc chủ đề tài liệu (có thể để trống): ")
+        
+        # Xử lý tài liệu nhập trực tiếp
+        process_document(document, "Tài_liệu_thủ_công", query=query, save_to_db=False)
+    
+    elif choice == '3':
+        # Tải tài liệu từ file
+        file_path = input("\nNhập đường dẫn đến file tài liệu: ")
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                document = file.read()
+            print(f"Đã tải thành công tài liệu từ {file_path}")
+            
+            # Lấy tên file làm document_id
+            import os
+            document_id = os.path.splitext(os.path.basename(file_path))[0]
+            
+            query = input("Nhập query hoặc chủ đề tài liệu (có thể để trống): ")
+            
+            # Xử lý tài liệu từ file
+            process_document(document, document_id, query=query, save_to_db=False)
+            
+        except Exception as e:
+            print(f"Lỗi khi đọc file: {e}")
     
     else:
         print("Lựa chọn không hợp lệ.")

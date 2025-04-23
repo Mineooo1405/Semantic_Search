@@ -7,7 +7,7 @@ import os
 from Tool.Sentence_Detector import sentence_detector, enhanced_sentence_detector, spacy_sentence_splitter,to_sentences
 from Tool.Sentence_Embedding import sentence_embedding
 from Tool.OIE import extract_triples_for_search
-
+import re
 import matplotlib.pyplot as plt
 import seaborn as sns
 import time
@@ -552,117 +552,6 @@ def save_to_database_with_oie(query, passage, sentences, vectors, chunks, all_tr
     finally:
         cursor.close()
         conn.close()
-        
-def process_passage(passage, passage_id, query="", visualize=True, save_to_db=True, extract_oie=True):
-    """Xử lý một đoạn văn: phát hiện câu, nhúng, phân nhóm, CHẠY OIE, và lưu kết quả"""
-    print(f"\n--- Đang xử lý passage {passage_id} ---")
-    
-    # Bước 1: Tách câu với phương pháp nâng cao
-    sentences = to_sentences(passage)
-    print(f"Đã tách thành {len(sentences)} câu")
-    
-    # Nếu không có câu nào, trả về kết quả rỗng
-    if not sentences:
-        print("Không có câu nào trong passage, bỏ qua")
-        return [], [], [], []
-    
-    # Bước 2: Tạo vector nhúng 
-    vectors = to_vectors(sentences)
-    
-    # Bước 3: Tạo ma trận similarity
-    sim_matrix = create_semantic_matrix(vectors)
-    
-    # Bước 4: Phân tích phân bố relationship và đưa ra đề xuất threshold
-    percentiles = analyze_similarity_distribution(sim_matrix, sentences)
-    
-    # Bước 5: Yêu cầu người dùng chọn các tham số
-    initial_threshold, decay_factor, min_threshold, min_chunk_len, max_chunk_len = get_parameters_from_user(percentiles)
-    
-    # Bước 6: Phân nhóm câu với threshold giảm dần
-    groups = semantic_sequential_spreading(sentences, sim_matrix, 
-                                 initial_threshold, 
-                                 decay_factor, 
-                                 min_threshold, 
-                                 min_chunk_len, 
-                                 max_chunk_len)
-    print(f"Đã phân thành {len(groups)} nhóm ")
-    
-    # Bước 7: Hiển thị các nhóm câu
-    display_groups(groups, sentences)
-    
-    # Bước 8: Trích xuất OIE triples (DI CHUYỂN XUỐNG SAU KHI ĐÃ NHÓM)
-    all_triples = []
-    sentence_triples = []
-    
-    if extract_oie:
-        print(f"[INFO] Đang trích xuất OpenIE triples từ {len(sentences)} câu...")
-        start_time = time.time()
-        
-        # Khởi tạo danh sách trống cho mỗi câu
-        sentence_triples = [[] for _ in range(len(sentences))]
-        
-        # Xử lý theo nhóm để có context tốt hơn
-        for group_idx, group in enumerate(groups):
-            print(f"  Đang trích xuất quan hệ cho nhóm {group_idx+1}/{len(groups)}...")
-            
-            # Trích xuất triples cho từng câu trong nhóm
-            for i, sentence_idx in enumerate(group):
-                sentence = sentences[sentence_idx]
-                
-                # Trích xuất triples từ câu với context là các câu khác trong nhóm
-                triples = extract_triples_for_search(sentence)
-                
-                # Lưu trữ triples
-                sentence_triples[sentence_idx] = triples
-                all_triples.extend(triples)
-        
-        elapsed_time = time.time() - start_time
-        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ trong {elapsed_time:.2f}s")
-    
-    # Bước 9: Hiển thị OIE triples theo nhóm
-    if extract_oie and all_triples:
-        display_oie_triples(groups, sentences, sentence_triples)
-    
-    # Bước 10: Trực quan hóa ma trận
-    if visualize:
-        visualize_similarity_matrix(sim_matrix, groups, 
-                                  title=f"Ma trận similarity - Passage {passage_id}")
-    
-    # Bước 11: Lưu kết quả vào database
-    if save_to_db:
-        # Tạo cấu trúc OIE_Sentence_Groups 
-        oie_sentence_groups = []
-        for group in groups:
-            group_triples = []
-            for idx in group:
-                group_triples.append(sentence_triples[idx])
-            oie_sentence_groups.append(group_triples)
-            
-        save_to_database_with_oie(query, passage, sentences, vectors, groups, all_triples, oie_sentence_groups)
-    
-    return sentences, vectors, groups, all_triples
-
-def test_manual_passage():
-    """Cho phép người dùng nhập passage và kiểm thử thuật toán mà không lưu vào database"""
-    print("\n=== TEST THỦ CÔNG VỚI PASSAGE TỰ NHẬP ===")
-    print("Nhập đoạn văn (kết thúc bằng một dòng trống):")
-    
-    lines = []
-    while True:
-        line = input()
-        if not line:
-            break
-        lines.append(line)
-    
-    if not lines:
-        print("Không có nội dung được nhập, hủy test.")
-        return
-    
-    passage = "\n".join(lines)
-    query = input("Nhập query (có thể để trống): ")
-    
-    # Xử lý passage nhưng không lưu vào database
-    process_passage(passage, "thủ công", query=query, save_to_db=False)
 
 def test_document():
     print("\n=== PHÂN NHÓM CHO TÀI LIỆU ===")
@@ -712,18 +601,31 @@ def test_document():
     # Xử lý tài liệu nhưng không lưu vào database
     process_document(document, "Tài liệu thủ công", query=query, save_to_db=False)
     
-def process_document(document, document_id, query="", visualize=True, save_to_db=False, extract_oie=True):
-    """Xử lý một tài liệu: phát hiện câu, nhúng, phân nhóm, trích xuất OIE và lưu kết quả"""
-    print(f"\n--- Đang xử lý tài liệu {document_id} ---")
+def process_document(document, document_id, query="", visualize=True, save_to_db=True, extract_oie=True):
+    """
+    Xử lý một tài liệu/đoạn văn: phát hiện câu, nhúng, phân nhóm, trích xuất OIE và lưu kết quả
     
-    # Bước 1: Tách câu
-    sentences = to_sentences(document)
-    print(f"Đã tách thành {len(sentences)} câu")
+    Args:
+        document: Văn bản cần xử lý
+        document_id: ID của tài liệu/đoạn văn
+        query: Query hoặc mô tả
+        visualize: Có trực quan hóa ma trận similarity hay không
+        save_to_db: Có lưu kết quả vào database hay không
+        extract_oie: Có trích xuất OIE triples hay không
+        
+    Returns:
+        tuple: (sentences, vectors, groups, all_triples)
+    """
+    print(f"\n--- Đang xử lý {document_id} ---")
+    
+    # Bước 1: Tách câu với phương pháp tối ưu
+    sentences = to_sentences(document, use_enhanced=True, use_spacy=True, min_words=3)
+    print(f"Đã tách thành {len(sentences)} câu tối ưu cho OIE")
     
     # Nếu không có câu nào, trả về kết quả rỗng
     if not sentences:
-        print("Không có câu nào trong tài liệu, bỏ qua")
-        return [], [], []
+        print("Không có câu nào trong văn bản, bỏ qua")
+        return [], [], [], []
     
     # Bước 2: Tạo vector nhúng
     vectors = to_vectors(sentences)
@@ -735,57 +637,13 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     percentiles = analyze_similarity_distribution(sim_matrix, sentences)
     
     # Bước 5: Yêu cầu người dùng chọn các tham số
-    while True:
-        try:
-            initial_threshold = float(input(f"\nNhập threshold relationship ban đầu (0.0-1.0, đề xuất: {percentiles['75%']:.4f}): ") or percentiles['75%'])
-            if 0 <= initial_threshold <= 1:
-                break
-            else:
-                print("threshold phải nằm trong khoảng từ 0 đến 1.")
-        except ValueError:
-            print("Vui lòng nhập một số thực.")
+    initial_threshold = float(input(f"\nNhập threshold relationship ban đầu (0.0-1.0, đề xuất: {percentiles['75%']:.4f}): ") or percentiles['75%'])
+    decay_factor = float(input("Nhập hệ số giảm threshold (0.7-0.95, đề xuất: 0.9): ") or "0.9")
+    min_threshold = float(input(f"Nhập threshold tối thiểu (0.1-0.5, đề xuất: {percentiles['25%']:.4f}): ") or percentiles['25%'])
+    min_chunk_len = int(input("Nhập độ dài tối thiểu của đoạn (1-5, đề xuất: 2): ") or "2")
+    max_chunk_len = int(input("Nhập độ dài tối đa của đoạn (5-15, đề xuất: 8): ") or "8")
     
-    while True:
-        try:
-            decay_factor = float(input("Nhập hệ số giảm threshold (0.7-0.95, đề xuất: 0.9): ") or "0.9")
-            if 0.7 <= decay_factor <= 0.95:
-                break
-            else:
-                print("Hệ số giảm nên nằm trong khoảng từ 0.7 đến 0.95.")
-        except ValueError:
-            print("Vui lòng nhập một số thực.")
-    
-    while True:
-        try:
-            min_threshold = float(input(f"Nhập threshold tối thiểu (0.1-0.5, đề xuất: {percentiles['25%']:.4f}): ") or percentiles['25%'])
-            if 0.1 <= min_threshold <= 0.5:
-                break
-            else:
-                print("threshold tối thiểu nên nằm trong khoảng từ 0.1 đến 0.5.")
-        except ValueError:
-            print("Vui lòng nhập một số thực.")
-    
-    while True:
-        try:
-            min_chunk_len = int(input("Nhập độ dài tối thiểu của đoạn (1-5, đề xuất: 2): ") or "2")
-            if 1 <= min_chunk_len <= 5:
-                break
-            else:
-                print("Độ dài tối thiểu nên nằm trong khoảng từ 1 đến 5.")
-        except ValueError:
-            print("Vui lòng nhập một số nguyên.")
-            
-    while True:
-        try:
-            max_chunk_len = int(input("Nhập độ dài tối đa của đoạn (5-15, đề xuất: 8): ") or "8")
-            if 5 <= max_chunk_len <= 15:
-                break
-            else:
-                print("Độ dài tối đa nên nằm trong khoảng từ 5 đến 15.")
-        except ValueError:
-            print("Vui lòng nhập một số nguyên.")
-    
-    # Bước 6: Phân nhóm câu với threshold giảm dần
+    # Bước 6: Phân nhóm câu với thuật toán phân đoạn tuần tự
     groups = semantic_sequential_spreading(sentences, sim_matrix, 
                                  initial_threshold, 
                                  decay_factor, 
@@ -794,10 +652,10 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
                                  max_chunk_len)
     print(f"Đã phân thành {len(groups)} nhóm ")
     
-    # Bước 7: Hiển thị kết quả nhóm
+    # Bước 7: Hiển thị các nhóm câu
     display_groups(groups, sentences)
     
-    # Bước 8: Trích xuất OIE triples (Đã DI CHUYỂN xuống sau khi đã nhóm)
+    # Bước 8: Trích xuất OIE triples
     all_triples = []
     sentence_triples = []
     
@@ -816,7 +674,7 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
             for i, sentence_idx in enumerate(group):
                 sentence = sentences[sentence_idx]
                 
-                # Trích xuất triples từ câu với context là các câu khác trong nhóm
+                # Trích xuất triples từ câu
                 triples = extract_triples_for_search(sentence)
                 
                 # Lưu trữ triples
@@ -853,7 +711,7 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
         else:
             save_to_database(query, document, sentences, vectors, groups)
     
-    return sentences, vectors, groups
+    return sentences, vectors, groups, all_triples
 
 def export_results_to_file(document, sentences, groups, sentence_triples, document_id):
     """
@@ -866,10 +724,22 @@ def export_results_to_file(document, sentences, groups, sentence_triples, docume
         sentence_triples: Danh sách triples theo từng câu
         document_id: ID của tài liệu
     """
-    filename = f"Semantic_Splitter_{document_id.replace(' ','_')}.txt"
+    # Chuẩn hóa document_id cho phù hợp với tên file
+    if document_id is None:
+        document_id = f"doc_{int(time.time())}"
+    
+    # Làm sạch document_id, loại bỏ các ký tự không hợp lệ
+    safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', document_id.replace(' ', '_'))
+    
+    # Thêm thông tin thời gian và phương pháp
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    
+    # Tạo tên file với nhiều thông tin hơn
+    filename = f"splitter_{safe_id}_{timestamp}.txt"
+    
     try:
         with open(filename, 'w', encoding='utf-8') as f:
-            f.write(f"KẾT QUẢ PHÂN NHÓM VÀ TRÍCH XUẤT QUAN HỆ (OIE)\n")
+            f.write(f"KẾT QUẢ PHÂN NHÓM TUẦN TỰ VÀ TRÍCH XUẤT QUAN HỆ (OIE)\n")
             f.write(f"Tài liệu: {document_id}\n")
             f.write(f"Thời gian: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
@@ -941,40 +811,13 @@ def extract_triples(sentences):
     
     return all_triples, sentence_triples
 
-def process_dataset(num_passages=10):
-    """
-    Xử lý một số passages từ dataset
-    
-    Args:
-        num_passages: Số lượng passages cần xử lý
-        
-    Returns:
-        list: Danh sách các ID đã lưu vào database
-    """
-    # Đọc dataset
-    doc = pd.read_csv('passages_1000.csv')
-    passages = doc['passage_text'].tolist()
-    
-    # Giới hạn số lượng passages
-    passages_to_process = passages[:min(num_passages, len(passages))]
-    
-    db_ids = []
-    for i, passage in enumerate(passages_to_process):
-        print(f"\n========== PROCESSING PASSAGE {i+1}/{len(passages_to_process)} ==========")
-        result = process_passage(passage, i+1, query=f"Query for passage {i+1}")
-        
-        # Lưu ID vào danh sách nếu thành công
-        if result and isinstance(result, tuple) and len(result) >= 3:
-            db_ids.append(i+1)
-    
-    print(f"\nĐã xử lý xong {len(passages_to_process)} passages")
-    return db_ids
 
 if __name__ == "__main__":
     print("1. Xử lý passages từ tập dữ liệu")
-    print("2. Phân tích tài liệu tự nhập hoặc từ file")
+    print("2. Phân tích tài liệu tự nhập")
+    print("3. Phân tích tài liệu từ file")
     
-    choice = input("\nLựa chọn của bạn (1/2): ")
+    choice = input("\nLựa chọn của bạn (1/2/3): ")
     
     if choice == '1':
         # Đọc dataset
@@ -996,10 +839,48 @@ if __name__ == "__main__":
         passages_to_process = passages[:min(num_passages, len(passages))]
         
         for i, passage in enumerate(passages_to_process):
-            process_passage(passage, i+1, query=f"Query for passage {i+1}")
+            process_document(passage, f"Passage {i+1}", query=f"Query for passage {i+1}")
     
     elif choice == '2':
-        test_document()
+        # Nhập tài liệu trực tiếp
+        print("\n=== NHẬP TÀI LIỆU TRỰC TIẾP ===")
+        print("Nhập nội dung tài liệu (kết thúc bằng một dòng chỉ có '###'):")
+        lines = []
+        while True:
+            line = input()
+            if line == '###':
+                break
+            lines.append(line)
+        
+        if not lines:
+            print("Không có nội dung được nhập, hủy phân tích.")
+            exit()
+        
+        document = "\n".join(lines)
+        query = input("Nhập query hoặc chủ đề tài liệu (có thể để trống): ")
+        
+        # Xử lý tài liệu nhập trực tiếp
+        process_document(document, "Splitter_Tài_liệu_thủ_công", query=query, save_to_db=False)
+    
+    elif choice == '3':
+        # Tải tài liệu từ file
+        file_path = input("\nNhập đường dẫn đến file tài liệu: ")
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                document = file.read()
+            print(f"Đã tải thành công tài liệu từ {file_path}")
+            
+            # Lấy tên file làm document_id
+            import os
+            document_id = os.path.splitext(os.path.basename(file_path))[0]
+            
+            query = input("Nhập query hoặc chủ đề tài liệu (có thể để trống): ")
+            
+            # Xử lý tài liệu từ file
+            process_document(document, f"Splitter_{document_id}", query=query, save_to_db=False)
+            
+        except Exception as e:
+            print(f"Lỗi khi đọc file: {e}")
     
     else:
         print("Lựa chọn không hợp lệ.")
