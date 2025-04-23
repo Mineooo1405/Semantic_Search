@@ -897,7 +897,7 @@ def export_results_to_file(document, sentences, groups, sentence_triples, docume
         sentence_triples: Danh sách triples theo từng câu
         document_id: ID của tài liệu
     """
-    filename = f"semantic_groups_{document_id.replace(' ','_')}.txt"
+    filename = f"Semantic_Splitter_{document_id.replace(' ','_')}.txt"
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             f.write(f"KẾT QUẢ PHÂN NHÓM VÀ TRÍCH XUẤT QUAN HỆ (OIE)\n")

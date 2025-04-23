@@ -780,7 +780,7 @@ def export_results_to_file(document, sentences, groups, sentence_triples=None, d
     if document_id is None:
         document_id = f"document_{int(time.time())}"
         
-    filename = f"semantic_groups_{document_id.replace(' ','_')}.txt"
+    filename = f"Semantic_Grouping_{document_id.replace(' ','_')}.txt"
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             f.write(f"KẾT QUẢ PHÂN NHÓM VÀ TRÍCH XUẤT QUAN HỆ (OIE)\n")
