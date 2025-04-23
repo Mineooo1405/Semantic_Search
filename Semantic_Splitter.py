@@ -4,7 +4,7 @@ import json
 import numpy as np
 from dotenv import load_dotenv
 import os
-from Tool.Sentence_Detector import sentence_detector, enhanced_sentence_detector, spacy_sentence_splitter
+from Tool.Sentence_Detector import sentence_detector, enhanced_sentence_detector, spacy_sentence_splitter,to_sentences
 from Tool.Sentence_Embedding import sentence_embedding
 from Tool.OIE import extract_triples_for_search
 
@@ -15,72 +15,6 @@ import pickle
 import spacy
 
 load_dotenv()
-
-# Load spaCy model
-try:
-    nlp = spacy.load("en_core_web_trf")
-    print("[INFO] Đã tải mô hình spaCy en_core_web_trf")
-except Exception as e:
-    print(f"[WARNING] Không thể tải mô hình spaCy: {e}")
-    nlp = None
-
-def to_sentences(passage, use_enhanced=True, use_spacy=True):
-    """
-    Tách đoạn văn thành các câu riêng biệt tối ưu cho OIE
-    
-    Args:
-        passage: Đoạn văn bản cần tách
-        use_enhanced: Sử dụng phương pháp tách câu nâng cao
-        use_spacy: Sử dụng spaCy cho việc tách câu chi tiết hơn
-        
-    Returns:
-        list: Danh sách các câu đã được chia nhỏ
-    """
-    result_sentences = []
-    
-    try:
-        # Bước 1: Đầu tiên tách bằng enhanced_sentence_detector
-        if use_enhanced:
-            initial_sentences = enhanced_sentence_detector(passage, aggressive=True)
-            print(f"[INFO] Đã tách thành {len(initial_sentences)} câu với detector nâng cao")
-        else:
-            initial_sentences = sentence_detector(passage)
-            print(f"[INFO] Đã tách thành {len(initial_sentences)} câu với detector cơ bản")
-        
-        # Cập nhật kết quả ban đầu
-        result_sentences = initial_sentences
-        
-        # Bước 2: Tiếp tục tách chi tiết hơn bằng spaCy nếu được yêu cầu
-        if use_spacy and nlp is not None:
-            final_sentences = []
-            
-            # Xử lý từng câu đã được tách ở bước 1
-            for sentence in initial_sentences:
-                # Bỏ qua câu quá ngắn
-                if len(sentence.split()) < 5:
-                    final_sentences.append(sentence)
-                    continue
-                
-                # Dùng spaCy để tách chi tiết hơn
-                _, sub_sentences = spacy_sentence_splitter(sentence)
-                final_sentences.extend(sub_sentences)
-            
-            # Loại bỏ trùng lặp và sắp xếp theo độ dài
-            final_sentences = sorted(set(final_sentences), key=len, reverse=True)
-            
-            # Cập nhật kết quả cuối cùng
-            result_sentences = final_sentences
-            print(f"[INFO] Đã tiếp tục tách thành {len(final_sentences)} câu con với spaCy")
-    
-    except Exception as e:
-        print(f"[WARNING] Lỗi khi sử dụng phương pháp tách câu: {e}")
-        print("[INFO] Sử dụng phương pháp cơ bản làm dự phòng")
-        result_sentences = sentence_detector(passage)
-    
-    # Lọc bỏ các câu trống
-    result_sentences = [s for s in result_sentences if s.strip()]
-    
-    return result_sentences
 
 def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
     cache_file = f"{cache_prefix}{hash(str(sentences))}.pkl"

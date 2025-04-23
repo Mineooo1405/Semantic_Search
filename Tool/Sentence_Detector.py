@@ -7,7 +7,7 @@ import spacy
 
 # Tải mô hình transformer
 try:
-    print("[INFO] Đang tải mô hình transformer (có thể mất vài phút đầu tiên)...")
+    print("[INFO] Đang tải mô hình transformer")
     nlp = spacy.load("en_core_web_trf")
     print("[INFO] Đã tải mô hình transformer thành công")
     USING_TRANSFORMER = True
@@ -95,6 +95,27 @@ def split_by_delimiter(sentence):
         result = [r for r in result if r]
         return result
     
+    # THÊM: Kiểm tra xem dấu phẩy có phân tách chủ ngữ-vị ngữ không
+    if ',' in sentence and len(sentence.split(',')) == 2:
+        parts = sentence.split(',')
+        # Kiểm tra phần đầu có phải là chủ ngữ (không chứa động từ chính)
+        # Và phần sau có phải là vị ngữ (bắt đầu với động từ)
+        first_part = parts[0].strip()
+        second_part = parts[1].strip()
+        
+        common_verbs = ['is', 'are', 'was', 'were', 'be', 'being', 'been',
+                      'have', 'has', 'had', 'do', 'does', 'did',
+                      'can', 'could', 'may', 'might', 'shall', 'should',
+                      'will', 'would', 'must', 'begin', 'began', 'begun']
+        
+        # Nếu phần đầu không chứa động từ phổ biến và phần sau bắt đầu bằng động từ
+        has_verb_in_first = any(f" {v} " in f" {first_part} " for v in common_verbs)
+        starts_with_verb = any(second_part.lower().startswith(v) for v in common_verbs)
+        
+        if not has_verb_in_first and starts_with_verb:
+            # Đây có thể là cặp chủ ngữ-vị ngữ, giữ nguyên
+            return [sentence]
+    
     # Nếu không thỏa điều kiện nào, trả về nguyên câu
     return [sentence]
 
@@ -172,7 +193,9 @@ def process_parenthetical(sentence):
     """
     # Tìm các cụm trong ngoặc
     paren_pattern = r'\(([^)]+)\)'      # (text inside parentheses)
-    dash_pattern = r'\s-\s([^-]+)\s-\s'  # - text between dashes -
+    
+    # Cập nhật mẫu regex để phát hiện chính xác cụm trong dấu gạch ngang
+    dash_pattern = r'\s+[-—–]\s+([^-—–]+?)\s+[-—–]\s+'
     
     parentheticals = []
     clean_sentence = sentence
@@ -190,7 +213,7 @@ def process_parenthetical(sentence):
         content = match.group(1)
         if len(content.split()) >= 3:  # Chỉ tách nếu có ít nhất 3 từ
             parentheticals.append(content)
-            # Xóa nội dung ngoặc khỏi câu chính
+            # Xóa nội dung ngoặc khỏi câu chính, giữ lại khoảng trắng
             clean_sentence = clean_sentence.replace(match.group(0), " ")
     
     # Trả về câu đã được làm sạch và các cụm trong ngoặc
@@ -200,37 +223,23 @@ def process_parenthetical(sentence):
     return [s for s in result if s and len(s.split()) >= 3]
 
 def enhanced_sentence_detector(text, aggressive=True):
-    """
-    Phương pháp nâng cao để tách văn bản thành câu và tiếp tục chia nhỏ các câu phức tạp
+    # Bảo vệ từ ghép có gạch nối
+    protected_text, replacements = protect_hyphenated_words(text)
     
-    Args:
-        text (str): Văn bản cần tách
-        aggressive (bool): Mức độ chia nhỏ tích cực
-        
-    Returns:
-        list: Danh sách các câu và cụm câu
-    """
-    # Tách thành câu cơ bản
-    sentences = sentence_detector(text)
+    # Tách câu cơ bản trước
+    sentences = sentence_detector(protected_text)
     
     # Đối với mỗi câu, tiếp tục chia nhỏ hơn
     refined_sentences = []
     
     for sentence in sentences:
-        # Chỉ xử lý câu đủ dài
-        if len(sentence.split()) < 5:
-            refined_sentences.append(sentence)
-            continue
         
         # 1. Xử lý các cụm trong ngoặc
         parenthetical_parts = process_parenthetical(sentence)
         
         # Với mỗi phần sau khi xử lý ngoặc
         for part in parenthetical_parts:
-            if len(part.split()) < 5:
-                refined_sentences.append(part)
-                continue
-                
+    
             # 2. Tách theo dấu câu
             delimiter_parts = split_by_delimiter(part)
             
@@ -238,8 +247,7 @@ def enhanced_sentence_detector(text, aggressive=True):
             if aggressive:
                 conjunction_parts = []
                 for d_part in delimiter_parts:
-                    # Chỉ chia tiếp các cụm dài
-                    if len(d_part.split()) > 10:
+                    if len(d_part.split()) > 5: 
                         conj_subparts = split_by_conjunction(d_part)
                         conjunction_parts.extend(conj_subparts)
                     else:
@@ -247,26 +255,19 @@ def enhanced_sentence_detector(text, aggressive=True):
                 refined_sentences.extend(conjunction_parts)
             else:
                 refined_sentences.extend(delimiter_parts)
-    
-    # Loại bỏ trùng lặp và chuẩn hóa
+
     result = []
     for s in refined_sentences:
         s = s.strip()
         if s and s not in result:
             result.append(s)
     
+    # Khôi phục từ ghép trong kết quả
+    result = [restore_hyphenated_words(s, replacements) for s in result]
     return result
 
 def sentence_splitter_for_oie(text):
-    """
-    Pipeline hoàn chỉnh để tách văn bản tối ưu cho OpenIE
     
-    Args:
-        text (str): Văn bản cần xử lý
-        
-    Returns:
-        tuple: (câu gốc, cụm câu đã chia nhỏ)
-    """
     # Tách câu cơ bản
     original_sentences = sentence_detector(text)
     
@@ -274,32 +275,9 @@ def sentence_splitter_for_oie(text):
     sub_sentences = enhanced_sentence_detector(text, aggressive=True)
     
     return original_sentences, sub_sentences
-
-# Demo chức năng
-if __name__ == "__main__":
-    example = "Pascal Hardy, an engineer and sustainable development consultant, began experimenting with vertical farming and aeroponic growing towers - as the soil-free plastic tubes are known - on his Paris apartment block roof five years ago."
-    
-    print("=== TÁCH CÂU CƠ BẢN ===")
-    basic_sentences = sentence_detector(example)
-    for i, s in enumerate(basic_sentences):
-        print(f"{i+1}. {s}")
-    
-    print("\n=== TÁCH CÂU NÂNG CAO (TỐI ƯU CHO OIE) ===")
-    enhanced_sentences = enhanced_sentence_detector(example)
-    for i, s in enumerate(enhanced_sentences):
-        print(f"{i+1}. {s}")
         
 def spacy_sentence_splitter(text, split_clauses=True):
-    """
-    Tách câu sử dụng spaCy với mô hình transformer
-    
-    Args:
-        text: Văn bản cần tách
-        split_clauses: Có chia nhỏ mệnh đề hay không
-    
-    Returns:
-        tuple: (original_sentences, sub_sentences)
-    """
+
     # Nếu không có spaCy, dùng phương pháp dự phòng
     if nlp is None:
         original_sentences = sentence_detector(text)
@@ -324,8 +302,7 @@ def spacy_sentence_splitter(text, split_clauses=True):
     
     # Cho mỗi câu
     for sent in doc.sents:
-        if len(sent) <= 10:  # Bỏ qua câu ngắn
-            continue
+        # Bỏ điều kiện kiểm tra độ dài câu để bao gồm cả câu ngắn
             
         # 1. Tách mệnh đề chính/phụ dựa trên phân tích phụ thuộc
         clause_heads = [token for token in sent 
@@ -364,36 +341,212 @@ def spacy_sentence_splitter(text, split_clauses=True):
             # Tạo chuỗi từ tokens
             clause_text = ' '.join(t.text for t in clause_tokens).strip()
             
-            # Chỉ thêm mệnh đề có ít nhất 3 từ và không trùng lặp
-            min_words = 3
+            # Giảm giới hạn từ tối thiểu từ 3 xuống 2
+            min_words = 2  # Giảm từ 3 xuống 2
             if len(clause_text.split()) >= min_words and clause_text not in sub_sentences:
                 sub_sentences.append(clause_text)
         
-        # 2. Xử lý cụm trong ngoặc
-        for token in sent:
-            if token.is_bracket or token.text in ['-', '(', '[', '{']:
-                # Tìm dấu đóng ngoặc tương ứng
-                stack = [token]
-                content_tokens = []
-                
-                for t in sent[token.i+1:]:
-                    if (token.text == '(' and t.text == ')') or \
-                       (token.text == '[' and t.text == ']') or \
-                       (token.text == '{' and t.text == '}') or \
-                       (token.text == '-' and t.text == '-'):
-                        # Tạo chuỗi từ nội dung trong ngoặc
-                        if content_tokens:
-                            content_text = ' '.join(t.text for t in content_tokens).strip()
-                            if len(content_text.split()) >= min_words and content_text not in sub_sentences:
-                                sub_sentences.append(content_text)
-                        break
-                    else:
-                        content_tokens.append(t)
+        # 2. Xử lý cụm trong ngoặc và dấu gạch ngang
+        for sent in doc.sents:
+            # Phát hiện cụm có dấu gạch ngang theo cách mới
+            dash_spans = []
+            
+            # Tìm các đoạn văn nằm giữa cặp dấu gạch ngang (có khoảng trắng xung quanh)
+            text = sent.text
+            
+            # Điều chỉnh regex cho dấu gạch ngang để phân biệt với từ ghép
+            # Sử dụng negative lookbehind và lookahead để tránh khớp với từ ghép có gạch nối
+            dash_pattern = r'(?<!\S)[-—–]\s+(.+?)\s+[-—–](?!\S)'
+            
+            for match in re.finditer(dash_pattern, text):
+                content = match.group(1)
+                # Kiểm tra thêm để đảm bảo không phải là phần của từ ghép
+                if ('-' not in content or ' ' in content) and len(content.split()) >= 2:
+                    if content not in sub_sentences:
+                        sub_sentences.append(content)
+            
+            # Xử lý các loại ngoặc (giữ nguyên phần này)
+            for token in sent:
+                if token.is_bracket or token.text in ['(', '[', '{']:
+                    # Tìm dấu đóng ngoặc tương ứng
+                    stack = [token]
+                    content_tokens = []
+                    
+                    for t in sent[token.i+1:]:
+                        if (token.text == '(' and t.text == ')') or \
+                           (token.text == '[' and t.text == ']') or \
+                           (token.text == '{' and t.text == '}'):
+                            # Tạo chuỗi từ nội dung trong ngoặc
+                            if content_tokens:
+                                content_text = ' '.join(t.text for t in content_tokens).strip()
+                                if len(content_text.split()) >= min_words and content_text not in sub_sentences:
+                                    sub_sentences.append(content_text)
+                            break
+                        else:
+                            content_tokens.append(t)
     
-    # Sắp xếp theo độ dài giảm dần để đảm bảo câu dài trước
-    sub_sentences = sorted(set(sub_sentences), key=len, reverse=True)
+    # Lọc trùng lặp nhưng giữ nguyên thứ tự xuất hiện
+    seen = set()
+    filtered_sentences = []
+    for s in sub_sentences:
+        if s not in seen:
+            seen.add(s)
+            filtered_sentences.append(s)
     
+    sub_sentences = filtered_sentences
     return original_sentences, sub_sentences
+
+def protect_hyphenated_words(text):
+    """
+    Bảo vệ từ ghép có gạch nối bằng cách tạm thời thay thế gạch nối bằng ký tự đặc biệt
+    
+    Args:
+        text: Văn bản cần xử lý
+        
+    Returns:
+        tuple: (processed_text, replacements)
+    """
+    # Mẫu regex cho từ ghép có gạch nối: từ-từ
+    hyphen_pattern = r'(\w+)-(\w+)'
+    
+    # Danh sách các từ cần khôi phục
+    replacements = {}
+    
+    # Hàm để thay thế từng từ ghép
+    def replace_match(match):
+        full_word = match.group(0)
+        placeholder = f"__HYPHEN_{len(replacements)}__"
+        replacements[placeholder] = full_word
+        return placeholder
+    
+    # Thay thế tất cả từ ghép có gạch nối
+    processed_text = re.sub(hyphen_pattern, replace_match, text)
+    
+    return processed_text, replacements
+
+def restore_hyphenated_words(text, replacements):
+    """
+    Khôi phục từ ghép có gạch nối từ ký tự đặc biệt
+    
+    Args:
+        text: Văn bản đã được xử lý
+        replacements: Dict ánh xạ từ placeholder đến từ gốc
+        
+    Returns:
+        str: Văn bản đã được khôi phục
+    """
+    restored_text = text
+    for placeholder, original in replacements.items():
+        restored_text = restored_text.replace(placeholder, original)
+    
+    return restored_text
+
+def filter_redundant_sentences(sentences):
+    """Lọc bỏ các câu dư thừa (là tập con của câu khác)"""
+    filtered = []
+    
+    # Sắp xếp câu theo độ dài giảm dần để ưu tiên câu dài hơn
+    sorted_sentences = sorted(sentences, key=len, reverse=True)
+    
+    for i, sentence1 in enumerate(sorted_sentences):
+        is_subset = False
+        # Loại bỏ dấu câu khi so sánh để tìm tập con chính xác hơn 
+        clean_s1 = re.sub(r'[,.;:!?\'"-]', '', sentence1.lower()).strip()
+        
+        # Kiểm tra xem câu này có phải là tập con của câu nào khác không
+        for j, sentence2 in enumerate(sorted_sentences):
+            if i == j:
+                continue
+                
+            # Loại bỏ dấu câu khi so sánh
+            clean_s2 = re.sub(r'[,.;:!?\'"-]', '', sentence2.lower()).strip()
+            
+            # Kiểm tra nếu là tập con nghiêm ngặt
+            if clean_s1 in clean_s2:
+                # Giảm ngưỡng xuống 0.6 (60%) để lọc nhiều hơn 
+                if len(clean_s1) / len(clean_s2) < 0.6:
+                    is_subset = True
+                    break
+        
+        if not is_subset:
+            filtered.append(sentence1)
+    
+    # Khôi phục lại thứ tự tương đối ban đầu
+    result = []
+    for s in sentences:
+        if s in filtered and s not in result:
+            result.append(s)
+    
+    return result
+
+def to_sentences(passage, use_enhanced=True, use_spacy=True):
+    # Tải mô hình transformer
+    try:
+        print("[INFO] Đang tải mô hình transformer")
+        nlp = spacy.load("en_core_web_trf")
+        print("[INFO] Đã tải mô hình transformer thành công")
+        USING_TRANSFORMER = True
+    except OSError:
+        print("[WARNING] Không tìm thấy mô hình 'en_core_web_trf'")
+        print("[INFO] Tải mô hình cơ bản...")
+        try:
+            nlp = spacy.load("en_core_web_sm")
+            print("[INFO] Đã tải mô hình cơ bản thành công")
+            USING_TRANSFORMER = False
+        except OSError:
+            print("[ERROR] Không tìm thấy mô hình spaCy nào")
+            print("[INFO] Vui lòng cài đặt: python -m spacy download en_core_web_trf")
+            nlp = None
+            USING_TRANSFORMER = False
+        
+    result_sentences = []
+    
+    try:
+        # Bước 1: Đầu tiên tách bằng enhanced_sentence_detector
+        if use_enhanced:
+            initial_sentences = enhanced_sentence_detector(passage, aggressive=True)
+            print(f"[INFO] Đã tách thành {len(initial_sentences)} câu với detector nâng cao")
+        else:
+            initial_sentences = sentence_detector(passage)
+            print(f"[INFO] Đã tách thành {len(initial_sentences)} câu với detector cơ bản")
+        
+        # Cập nhật kết quả ban đầu
+        result_sentences = initial_sentences
+        
+        # Bước 2: Tiếp tục tách chi tiết hơn bằng spaCy nếu được yêu cầu
+        if use_spacy and nlp is not None:
+            final_sentences = []
+            
+            # Xử lý từng câu đã được tách ở bước 1
+            for sentence in initial_sentences:
+                # Bao gồm cả câu ngắn (loại bỏ giới hạn từ)
+                if not sentence.strip():
+                    continue
+                
+                # Dùng spaCy để tách chi tiết hơn
+                _, sub_sentences = spacy_sentence_splitter(sentence)
+                final_sentences.extend(sub_sentences)
+            
+            # Loại bỏ trùng lặp nhưng giữ nguyên thứ tự xuất hiện ban đầu
+            seen = set()
+            result_sentences = []
+            for s in final_sentences:
+                if s.strip() and s not in seen:
+                    seen.add(s)
+                    result_sentences.append(s)
+            
+            print(f"[INFO] Đã tiếp tục tách thành {len(result_sentences)} câu con với spaCy")
+    
+    except Exception as e:
+        print(f"[WARNING] Lỗi khi sử dụng phương pháp tách câu: {e}")
+        print("[INFO] Sử dụng phương pháp cơ bản làm dự phòng")
+        result_sentences = sentence_detector(passage)
+    
+    # Lọc bỏ các câu trống và câu dư thừa
+    result_sentences = [s for s in result_sentences if s.strip()]
+    result_sentences = filter_redundant_sentences(result_sentences)
+
+    return result_sentences
 
 # Hàm main để kiểm tra khi chạy trực tiếp
 if __name__ == "__main__":
@@ -408,4 +561,22 @@ if __name__ == "__main__":
     
     print("\nSub-sentences:")
     for i, s in enumerate(sub_sentences):
+        print(f"{i+1}. {s}")
+    
+    # Test hàm to_sentences mới
+    print("\n=== Test with Combined Approach ===")
+    combined_sentences = to_sentences(test_text, use_enhanced=True, use_spacy=True)
+    
+    print("\nCombined sentences:")
+    for i, s in enumerate(combined_sentences):
+        print(f"{i+1}. {s}")
+    
+    # Test với một ví dụ phức tạp hơn
+    complex_text = "The equipment weighs little, can be installed on almost any flat surface, and doesn't depend on a supply of electricity. Instead it is powered by the process that produced it: the natural growth of plants. Hardy's company, Agripolis, has installed systems at 75 different Parisian sites, reducing the distance food travels to reach the city's markets and restaurants."
+    
+    print("\n=== Test Complex Example ===")
+    complex_sentences = to_sentences(complex_text)
+    
+    print("\nCombined sentences (complex):")
+    for i, s in enumerate(complex_sentences):
         print(f"{i+1}. {s}")
