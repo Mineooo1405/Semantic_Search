@@ -17,3 +17,6 @@ pip install psycopg2
 
 #DataProcess
 pip install ast #use for dataset processing
+
+#run sentence detector
+python Sentence_Detector.py -i input.txt -o report_oie.txt --simplify -f

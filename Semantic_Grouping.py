@@ -4,7 +4,7 @@ import json
 import numpy as np
 from dotenv import load_dotenv
 import os
-from Tool.Sentence_Detector import sentence_detector, enhanced_sentence_detector, spacy_sentence_splitter,to_sentences
+from Tool.Sentence_Detector import extract_and_simplify_sentences
 from Tool.Sentence_Embedding import sentence_embedding
 from Tool.OIE import extract_triples_for_search  # Thêm import OIE
 import matplotlib.pyplot as plt
@@ -513,7 +513,7 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
     print(f"\n--- Đang xử lý {document_id} ---")
     
     # Bước 1: Tách câu
-    sentences = to_sentences(document, use_enhanced=True, use_spacy=True, min_words=3)
+    sentences = extract_and_simplify_sentences(document, simplify=True)
     print(f"Đã tách thành {len(sentences)} câu tối ưu cho OIE")
     
     # Nếu không có câu nào, trả về kết quả rỗng

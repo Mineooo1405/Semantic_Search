@@ -1,871 +1,437 @@
-from nltk.tokenize import sent_tokenize
+"""
+Sentence Detector and Simplifier
+Splits text into paragraphs and sentences. Optionally simplifies complex sentences
+for downstream tasks like Open Information Extraction (OIE) and Semantic Grouping.
+"""
+
 import re
-import nltk
+from typing import List, Dict, Tuple
+import datetime
+import os
+import time # Thêm time để tạo timestamp nếu cần
 
-# Cách import và load spaCy đúng
-import spacy
+# Common abbreviations to protect during sentence splitting
+COMMON_ABBREVIATIONS = {
+    "Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Rev.", "Gen.", "Col.", "Maj.", "Capt.",
+    "Lt.", "St.", "Sr.", "Jr.", "Ph.D.", "M.D.", "B.A.", "M.A.", "i.e.", "e.g.",
+    "etc.", "vs.", "a.m.", "p.m.", "U.S.", "U.K.", "E.U.", "Fig.", "No.", "Vol."
+}
 
-# Tải mô hình transformer
-try:
-    print("[INFO] Đang tải mô hình transformer")
-    nlp = spacy.load("en_core_web_trf")
-    print("[INFO] Đã tải mô hình transformer thành công")
-    USING_TRANSFORMER = True
-except OSError:
-    print("[WARNING] Không tìm thấy mô hình 'en_core_web_trf'")
-    print("[INFO] Tải mô hình cơ bản...")
-    try:
-        nlp = spacy.load("en_core_web_sm")
-        print("[INFO] Đã tải mô hình cơ bản thành công")
-        USING_TRANSFORMER = False
-    except OSError:
-        print("[ERROR] Không tìm thấy mô hình spaCy nào")
-        print("[INFO] Vui lòng cài đặt: python -m spacy download en_core_web_trf")
-        nlp = None
-        USING_TRANSFORMER = False
-
-def sentence_detector(text):
-    """
-    Phương pháp cơ bản để tách văn bản thành các câu
-    
-    Args:
-        text (str): Văn bản cần tách
-        
-    Returns:
-        list: Danh sách các câu
-    """
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        nltk.download('punkt')
- 
-    return sent_tokenize(text)
-
-def split_by_delimiter(sentence):
-    """
-    Tách câu theo dấu câu ngắt mềm (phẩy, chấm phẩy, hai chấm)
-    
-    Args:
-        sentence (str): Câu cần tách
-        
-    Returns:
-        list: Danh sách các cụm sau khi tách
-    """
-    # Tách theo dấu phẩy, chấm phẩy, dấu hai chấm nhưng giữ ngữ cảnh
-    # Không tách nếu dưới 5 từ tránh tạo cụm vô nghĩa
-    if len(sentence.split()) < 5:
-        return [sentence]
-    
-    # Tách câu có các cụm rõ ràng (chấm phẩy, hai chấm)
-    if ';' in sentence or ':' in sentence:
-        subsentences = re.split(r'(?<=[;:])\s+', sentence)
-        result = []
-        for sub in subsentences:
-            if len(sub.split()) >= 3:  # Chỉ giữ cụm có ít nhất 3 từ
-                result.append(sub.strip())
-            else:
-                # Nếu quá ngắn, ghép vào cụm trước đó
-                if result:
-                    result[-1] = result[-1] + " " + sub.strip()
-                else:
-                    result.append(sub.strip())
-        return result
-    
-    # Tách câu dài theo dấu phẩy
-    if len(sentence.split()) > 12 and ',' in sentence:
-        subsentences = re.split(r'(?<=,)\s+', sentence)
-        result = []
-        
-        for i, sub in enumerate(subsentences):
-            if len(sub.split()) >= 4:  # Cụm tương đối đầy đủ
-                result.append(sub.strip())
-            else:
-                # Ghép cụm ngắn với cụm liền trước hoặc sau
-                if result:
-                    result[-1] = result[-1] + " " + sub.strip()
-                else:
-                    # Nếu là cụm đầu tiên quá ngắn, ghép với cụm tiếp theo
-                    if i+1 < len(subsentences):
-                        result.append(sub.strip() + " " + subsentences[i+1].strip())
-                        subsentences[i+1] = ""  # Đánh dấu đã xử lý
-                    else:
-                        result.append(sub.strip())
-        
-        # Lọc bỏ cụm rỗng
-        result = [r for r in result if r]
-        return result
-    
-    # THÊM: Kiểm tra xem dấu phẩy có phân tách chủ ngữ-vị ngữ không
-    if ',' in sentence and len(sentence.split(',')) == 2:
-        parts = sentence.split(',')
-        # Kiểm tra phần đầu có phải là chủ ngữ (không chứa động từ chính)
-        # Và phần sau có phải là vị ngữ (bắt đầu với động từ)
-        first_part = parts[0].strip()
-        second_part = parts[1].strip()
-        
-        common_verbs = ['is', 'are', 'was', 'were', 'be', 'being', 'been',
-                      'have', 'has', 'had', 'do', 'does', 'did',
-                      'can', 'could', 'may', 'might', 'shall', 'should',
-                      'will', 'would', 'must', 'begin', 'began', 'begun']
-        
-        # Nếu phần đầu không chứa động từ phổ biến và phần sau bắt đầu bằng động từ
-        has_verb_in_first = any(f" {v} " in f" {first_part} " for v in common_verbs)
-        starts_with_verb = any(second_part.lower().startswith(v) for v in common_verbs)
-        
-        if not has_verb_in_first and starts_with_verb:
-            # Đây có thể là cặp chủ ngữ-vị ngữ, giữ nguyên
-            return [sentence]
-    
-    # Nếu không thỏa điều kiện nào, trả về nguyên câu
-    return [sentence]
-
-def split_by_conjunction(sentence):
-    """
-    Tách câu theo liên từ phổ biến
-    
-    Args:
-        sentence (str): Câu cần tách
-        
-    Returns:
-        list: Danh sách các cụm sau khi tách
-    """
-    # Chỉ tách câu dài và có liên từ
-    if len(sentence.split()) < 10:
-        return [sentence]
-    
-    # Các mẫu có liên từ phổ biến kèm dấu phẩy
-    patterns = [
-        r',\s+(and|but|or)\s+',  # ", and ", ", but ", ", or "
-        r'\s+(because|although|though|while|whereas|since)\s+',  # "because", "although"...
-        r',\s+(which|who|whom|where|when)\s+'  # ", which ", ", who "...
-    ]
-    
-    # Tìm tất cả vị trí tách tiềm năng
-    split_positions = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, sentence):
-            split_positions.append((match.start(), match.end(), match.group()))
-    
-    # Nếu không tìm thấy điểm tách
-    if not split_positions:
-        return [sentence]
-    
-    # Sắp xếp theo vị trí xuất hiện
-    split_positions.sort()
-    
-    # Tách câu thành các phần
-    result = []
-    last_end = 0
-    
-    for start, end, connector in split_positions:
-        # Từ vị trí cuối cùng đến liên từ hiện tại 
-        part = sentence[last_end:start].strip()
-        
-        # Chỉ thêm phần có ý nghĩa (ít nhất 3 từ)
-        if len(part.split()) >= 3:
-            result.append(part)
-            
-            # Cập nhật vị trí cuối
-            last_end = start + 1  # Giữ lại dấu phẩy nếu có
-    
-    # Thêm phần cuối cùng
-    final_part = sentence[last_end:].strip()
-    if len(final_part.split()) >= 3:
-        result.append(final_part)
-    elif result:  # Nếu phần cuối quá ngắn, ghép vào phần trước
-        result[-1] = result[-1] + " " + final_part
-    
-    # Nếu kết quả trống, trả về câu gốc
-    if not result:
-        return [sentence]
-        
-    return result
-
-def process_parenthetical(sentence):
-    """
-    Xử lý các cụm trong ngoặc đơn và ngoặc ngang
-    
-    Args:
-        sentence (str): Câu cần xử lý
-        
-    Returns:
-        list: Danh sách các cụm chính và cụm trong ngoặc
-    """
-    # Tìm các cụm trong ngoặc
-    paren_pattern = r'\(([^)]+)\)'      # (text inside parentheses)
-    
-    # Cập nhật mẫu regex để phát hiện chính xác cụm trong dấu gạch ngang
-    dash_pattern = r'\s+[-—–]\s+([^-—–]+?)\s+[-—–]\s+'
-    
-    parentheticals = []
-    clean_sentence = sentence
-    
-    # Xử lý ngoặc đơn
-    for match in re.finditer(paren_pattern, sentence):
-        content = match.group(1)
-        if len(content.split()) >= 3:  # Chỉ tách nếu có ít nhất 3 từ
-            parentheticals.append(content)
-            # Xóa nội dung ngoặc khỏi câu chính
-            clean_sentence = clean_sentence.replace(match.group(0), "")
-    
-    # Xử lý ngoặc ngang
-    for match in re.finditer(dash_pattern, sentence):
-        content = match.group(1)
-        if len(content.split()) >= 3:  # Chỉ tách nếu có ít nhất 3 từ
-            parentheticals.append(content)
-            # Xóa nội dung ngoặc khỏi câu chính, giữ lại khoảng trắng
-            clean_sentence = clean_sentence.replace(match.group(0), " ")
-    
-    # Trả về câu đã được làm sạch và các cụm trong ngoặc
-    result = [clean_sentence.strip()]
-    result.extend(parentheticals)
-    
-    return [s for s in result if s and len(s.split()) >= 3]
-
-def enhanced_sentence_detector(text, aggressive=True):
-    # Bảo vệ từ ghép có gạch nối
-    protected_text, replacements = protect_hyphenated_words(text)
-    
-    # Tách câu cơ bản trước
-    sentences = sentence_detector(protected_text)
-    
-    # Đối với mỗi câu, tiếp tục chia nhỏ hơn
-    refined_sentences = []
-    
-    for sentence in sentences:
-        
-        # 1. Xử lý các cụm trong ngoặc
-        parenthetical_parts = process_parenthetical(sentence)
-        
-        # Với mỗi phần sau khi xử lý ngoặc
-        for part in parenthetical_parts:
-    
-            # 2. Tách theo dấu câu
-            delimiter_parts = split_by_delimiter(part)
-            
-            # 3. Nếu cần chia tích cực hơn, tách theo liên từ
-            if aggressive:
-                conjunction_parts = []
-                for d_part in delimiter_parts:
-                    if len(d_part.split()) > 5: 
-                        conj_subparts = split_by_conjunction(d_part)
-                        conjunction_parts.extend(conj_subparts)
-                    else:
-                        conjunction_parts.append(d_part)
-                refined_sentences.extend(conjunction_parts)
-            else:
-                refined_sentences.extend(delimiter_parts)
-
-    result = []
-    for s in refined_sentences:
-        s = s.strip()
-        if s and s not in result:
-            result.append(s)
-    
-    # Khôi phục từ ghép trong kết quả
-    result = [restore_hyphenated_words(s, replacements) for s in result]
-    return result
-
-def sentence_splitter_for_oie(text):
-    
-    # Tách câu cơ bản
-    original_sentences = sentence_detector(text)
-    
-    # Chia nhỏ câu tích cực để phục vụ OIE
-    sub_sentences = enhanced_sentence_detector(text, aggressive=True)
-    
-    return original_sentences, sub_sentences
-        
-def spacy_sentence_splitter(text, split_clauses=True):
-
-    # Nếu không có spaCy, dùng phương pháp dự phòng
-    if nlp is None:
-        original_sentences = sentence_detector(text)
-        enhanced = enhanced_sentence_detector(text, aggressive=split_clauses)
-        return original_sentences, enhanced
-    
-    # Xử lý văn bản với spaCy
-    doc = nlp(text)
-    
-    # Danh sách câu gốc
-    original_sentences = [sent.text for sent in doc.sents]
-    
-    # Nếu không cần chia nhỏ mệnh đề, trả về câu gốc
-    if not split_clauses:
-        return original_sentences, original_sentences
-    
-    # Danh sách kết quả sau khi chia nhỏ
-    sub_sentences = []
-    
-    # Thêm câu gốc trước
-    sub_sentences.extend(original_sentences)
-    
-    # Cho mỗi câu
-    for sent in doc.sents:
-        # Bỏ điều kiện kiểm tra độ dài câu để bao gồm cả câu ngắn
-            
-        # 1. Tách mệnh đề chính/phụ dựa trên phân tích phụ thuộc
-        clause_heads = [token for token in sent 
-                       if token.dep_ in ('ROOT', 'ccomp', 'xcomp', 'advcl', 'acl', 'relcl') 
-                       and token.pos_ == 'VERB']
-        
-        for head in clause_heads:
-            # Bỏ qua nếu là động từ trong câu gốc
-            if head.dep_ == 'ROOT':
-                continue
-                
-            # Xây dựng mệnh đề từ gốc
-            clause_tokens = []
-            
-            # Tìm chủ ngữ của mệnh đề
-            subjects = [child for child in head.children 
-                       if child.dep_ in ('nsubj', 'nsubjpass')]
-            
-            # Thêm chủ ngữ vào mệnh đề
-            for subj in subjects:
-                clause_tokens.append(subj)
-                # Thêm các từ phụ thuộc vào chủ ngữ
-                clause_tokens.extend(list(subj.subtree))
-            
-            # Thêm động từ
-            clause_tokens.append(head)
-            
-            # Thêm các từ phụ thuộc vào động từ (trừ liên từ và dấu)
-            for child in head.children:
-                if child.dep_ not in ('punct', 'cc', 'mark') and child not in subjects:
-                    clause_tokens.extend(list(child.subtree))
-            
-            # Sắp xếp token theo vị trí trong câu
-            clause_tokens = sorted(set(clause_tokens), key=lambda x: x.i)
-            
-            # Tạo chuỗi từ tokens
-            clause_text = ' '.join(t.text for t in clause_tokens).strip()
-            
-            # Giảm giới hạn từ tối thiểu từ 3 xuống 2
-            min_words = 2  # Giảm từ 3 xuống 2
-            if len(clause_text.split()) >= min_words and clause_text not in sub_sentences:
-                sub_sentences.append(clause_text)
-        
-        # 2. Xử lý cụm trong ngoặc và dấu gạch ngang
-        for sent in doc.sents:
-            # Phát hiện cụm có dấu gạch ngang theo cách mới
-            dash_spans = []
-            
-            # Tìm các đoạn văn nằm giữa cặp dấu gạch ngang (có khoảng trắng xung quanh)
-            text = sent.text
-            
-            # Điều chỉnh regex cho dấu gạch ngang để phân biệt với từ ghép
-            # Sử dụng negative lookbehind và lookahead để tránh khớp với từ ghép có gạch nối
-            dash_pattern = r'(?<!\S)[-—–]\s+(.+?)\s+[-—–](?!\S)'
-            
-            for match in re.finditer(dash_pattern, text):
-                content = match.group(1)
-                # Kiểm tra thêm để đảm bảo không phải là phần của từ ghép
-                if ('-' not in content or ' ' in content) and len(content.split()) >= 2:
-                    if content not in sub_sentences:
-                        sub_sentences.append(content)
-            
-            # Xử lý các loại ngoặc (giữ nguyên phần này)
-            for token in sent:
-                if token.is_bracket or token.text in ['(', '[', '{']:
-                    # Tìm dấu đóng ngoặc tương ứng
-                    stack = [token]
-                    content_tokens = []
-                    
-                    for t in sent[token.i+1:]:
-                        if (token.text == '(' and t.text == ')') or \
-                           (token.text == '[' and t.text == ']') or \
-                           (token.text == '{' and t.text == '}'):
-                            # Tạo chuỗi từ nội dung trong ngoặc
-                            if content_tokens:
-                                content_text = ' '.join(t.text for t in content_tokens).strip()
-                                if len(content_text.split()) >= min_words and content_text not in sub_sentences:
-                                    sub_sentences.append(content_text)
-                            break
-                        else:
-                            content_tokens.append(t)
-    
-    # Lọc trùng lặp nhưng giữ nguyên thứ tự xuất hiện
-    seen = set()
-    filtered_sentences = []
-    for s in sub_sentences:
-        if s not in seen:
-            seen.add(s)
-            filtered_sentences.append(s)
-    
-    sub_sentences = filtered_sentences
-    return original_sentences, sub_sentences
-
-def protect_hyphenated_words(text):
-    """
-    Bảo vệ từ ghép có gạch nối bằng cách tạm thời thay thế gạch nối bằng ký tự đặc biệt
-    
-    Args:
-        text: Văn bản cần xử lý
-        
-    Returns:
-        tuple: (processed_text, replacements)
-    """
-    # Mẫu regex cho từ ghép có gạch nối: từ-từ
-    hyphen_pattern = r'(\w+)-(\w+)'
-    
-    # Danh sách các từ cần khôi phục
+def protect_abbreviations(text: str) -> Tuple[str, Dict[str, str]]:
+    """Replaces common abbreviations with placeholders to prevent incorrect splitting."""
     replacements = {}
-    
-    # Hàm để thay thế từng từ ghép
-    def replace_match(match):
-        full_word = match.group(0)
-        placeholder = f"__HYPHEN_{len(replacements)}__"
-        replacements[placeholder] = full_word
-        return placeholder
-    
-    # Thay thế tất cả từ ghép có gạch nối
-    processed_text = re.sub(hyphen_pattern, replace_match, text)
-    
-    return processed_text, replacements
+    protected_text = text
+    # Use regex for safer replacement (whole word only) might be better, but simple replace for now
+    for abbr in COMMON_ABBREVIATIONS:
+        placeholder = f"__ABBR_{len(replacements)}__"
+        # Basic replacement, might replace parts of words if not careful
+        protected_text = protected_text.replace(abbr, placeholder)
+        replacements[placeholder] = abbr
+    return protected_text, replacements
 
-def restore_hyphenated_words(text, replacements):
-    """
-    Khôi phục từ ghép có gạch nối từ ký tự đặc biệt
-    
-    Args:
-        text: Văn bản đã được xử lý
-        replacements: Dict ánh xạ từ placeholder đến từ gốc
-        
-    Returns:
-        str: Văn bản đã được khôi phục
-    """
-    restored_text = text
+def restore_abbreviations(text: str, replacements: Dict[str, str]) -> str:
+    """Restores abbreviations from placeholders."""
+    result = text
     for placeholder, original in replacements.items():
-        restored_text = restored_text.replace(placeholder, original)
-    
-    return restored_text
-
-def filter_redundant_sentences(sentences):
-    """Lọc bỏ các câu dư thừa (là tập con của câu khác)"""
-    filtered = []
-    
-    # Sắp xếp câu theo độ dài giảm dần để ưu tiên câu dài hơn
-    sorted_sentences = sorted(sentences, key=len, reverse=True)
-    
-    for i, sentence1 in enumerate(sorted_sentences):
-        is_subset = False
-        # Loại bỏ dấu câu khi so sánh để tìm tập con chính xác hơn 
-        clean_s1 = re.sub(r'[,.;:!?\'"-]', '', sentence1.lower()).strip()
-        
-        # Kiểm tra xem câu này có phải là tập con của câu nào khác không
-        for j, sentence2 in enumerate(sorted_sentences):
-            if i == j:
-                continue
-                
-            # Loại bỏ dấu câu khi so sánh
-            clean_s2 = re.sub(r'[,.;:!?\'"-]', '', sentence2.lower()).strip()
-            
-            # Kiểm tra nếu là tập con nghiêm ngặt
-            if clean_s1 in clean_s2:
-                # Giảm ngưỡng xuống 0.6 (60%) để lọc nhiều hơn 
-                if len(clean_s1) / len(clean_s2) < 0.6:
-                    is_subset = True
-                    break
-        
-        if not is_subset:
-            filtered.append(sentence1)
-    
-    # Khôi phục lại thứ tự tương đối ban đầu
-    result = []
-    for s in sentences:
-        if s in filtered and s not in result:
-            result.append(s)
-    
+        result = result.replace(placeholder, original)
     return result
 
-def filter_subset_sentences(sentences):
-    """Lọc bỏ câu là tập con nghiêm ngặt của câu khác"""
-    filtered = []
-    
-    # Sắp xếp theo độ dài giảm dần
-    sorted_sentences = sorted(sentences, key=len, reverse=True)
-    
-    for i, sentence1 in enumerate(sorted_sentences):
-        is_subset = False
-        clean_s1 = re.sub(r'[,.;:!?\'"-]', '', sentence1.lower()).strip()
-        
-        for j, sentence2 in enumerate(sorted_sentences):
-            if i == j:
-                continue
-            
-            clean_s2 = re.sub(r'[,.;:!?\'"-]', '', sentence2.lower()).strip()
-            
-            # Kiểm tra là tập con và độ dài chênh lệch > 30%
-            if clean_s1 in clean_s2 and len(clean_s1) / len(clean_s2) < 0.7:
-                is_subset = True
-                break
-        
-        if not is_subset:
-            filtered.append(sentence1)
-    
-    return filtered
+def clean_text(text: str) -> str:
+    """Cleans and normalizes raw text input."""
+    # Normalize line breaks
+    text = re.sub(r'\r\n|\r', '\n', text)
+    # Remove excessive blank lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Handle special unicode line breaks
+    text = text.replace('\u2028', '\n').replace('\u2029', '\n')
+    # Remove list numbering at the start of lines
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+    # Handle potentially problematic period usage like "word.1. Word"
+    text = re.sub(r'(\d+)\.(\d+)\.', r'\1. \2.', text)
+    text = re.sub(r'([a-zA-Z])\.(\d+)\.', r'\1. \2.', text, flags=re.IGNORECASE)
+    # Normalize quotes and dashes
+    text = text.replace('“', '"').replace('”', '"')
+    text = text.replace('‘', "'").replace('’', "'")
+    text = text.replace("—", "-").replace("–", "-")
+    return text
 
-def filter_sentences_for_oie(sentences, min_words=3):
-    """Lọc các câu phù hợp cho việc trích xuất OIE"""
-    filtered = []
-    
-    for sentence in sentences:
-        # Loại bỏ câu quá ngắn
-        if len(sentence.split()) < min_words:
-            continue
-            
-        # Loại bỏ các fragment không hoàn chỉnh
-        if re.match(r'^(and|or|but|because|if|when|while|since|although|though)\s', sentence.lower()):
-            # Fragment bắt đầu bằng liên từ
-            continue
-            
-        # Kiểm tra cấu trúc chủ ngữ-vị ngữ (câu nên có ít nhất 1 động từ)
-        words = sentence.lower().split()
-        if not any(verb in words for verb in ['is', 'are', 'was', 'were', 'am', 'be', 'been', 'being',
-                                           'have', 'has', 'had', 'do', 'does', 'did', 
-                                           'can', 'could', 'will', 'would', 'may', 'might', 'shall', 'should',
-                                           'must']):
-            # Thử kiểm tra động từ thông thường với 'ed', 'ing' kết thúc
-            if not any(w.endswith(('ed', 'ing')) for w in words):
-                continue
-        
-        # Loại bỏ câu quá dài (có thể khó trích xuất OIE chính xác)
-        if len(sentence.split()) > 40:
-            # Có thể bổ sung phương pháp tách câu phức tạp
-            pass
-            
-        filtered.append(sentence)
-    
-    # Lọc bỏ các câu là tập con của nhau
-    return filter_subset_sentences(filtered)
+def normalize_paragraph(paragraph: str) -> str:
+    """Normalizes a single paragraph by removing internal line breaks and standardizing whitespace."""
+    # Remove internal line breaks
+    clean_para = re.sub(r'\s*\n\s*', ' ', paragraph)
+    # Standardize whitespace
+    clean_para = re.sub(r'\s+', ' ', clean_para).strip()
+    # Fix cases like "end.1. Start"
+    clean_para = re.sub(r'(\.)(\d+\.\s)', r'\1 \2', clean_para)
+    return clean_para
 
-def to_sentences(passage, use_enhanced=True, use_spacy=True, min_words=3):
-    """
-    Tách đoạn văn thành các câu tối ưu cho OIE
-    
-    Args:
-        passage: Đoạn văn bản cần tách
-        use_enhanced: Sử dụng phương pháp tách câu nâng cao
-        use_spacy: Sử dụng spaCy cho việc tách câu chi tiết
-        min_words: Số từ tối thiểu trong một câu
-        
-    Returns:
-        list: Danh sách các câu đã được tối ưu cho OIE
-    """
-    result_sentences = []
-    
-    try:
-        # Bước 1: Tiền xử lý đoạn văn - gộp dòng và chuẩn hóa dấu câu
-        passage = re.sub(r'\s+', ' ', passage)
-        passage = re.sub(r'\.{2,}', '.', passage)  # Thay ... bằng .
-        
-        # Bảo vệ từ ghép có gạch nối
-        protected_text, replacements = protect_hyphenated_words(passage)
-        
-        # Bước 2: Tách câu cơ bản (giữ nguyên câu dài)
-        if use_enhanced:
-            initial_sentences = enhanced_sentence_detector(protected_text, aggressive=False)
-            print(f"[INFO] Đã tách thành {len(initial_sentences)} câu với detector nâng cao")
+def split_into_paragraphs(text: str) -> List[str]:
+    """Splits cleaned text into paragraphs based on double line breaks."""
+    text = clean_text(text)
+    # Rejoin hyphenated words broken across lines
+    text = re.sub(r'([a-zA-Z])- *\n *([a-zA-Z])', r'\1\2', text)
+    # Remove single line breaks used for formatting within paragraphs
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    # Split into paragraphs based on double line breaks
+    raw_paragraphs = text.split('\n\n')
+    # Normalize each paragraph
+    paragraphs = [normalize_paragraph(p) for p in raw_paragraphs if normalize_paragraph(p)]
+    return paragraphs
+
+def split_paragraph_into_sentences(paragraph: str) -> List[str]:
+    """Splits a normalized paragraph into sentences, protecting abbreviations."""
+    protected_text, replacements = protect_abbreviations(paragraph)
+
+    # Split primarily by periods followed by space or end-of-string.
+    # This is a basic approach; more robust splitting might consider ?, ! etc.
+    # Using lookahead `(?=...)` to avoid consuming the delimiter space.
+    raw_sentences = re.split(r'\.(?=\s+|$)', protected_text) # Basic split on '.'
+
+    # Consider splitting on other punctuation like '?' and '!' as well
+    # This requires a more complex regex or iterative splitting.
+    # Example: re.split(r'(?<=[.?!])\s+', protected_text)
+
+    sentences = []
+    for sentence in raw_sentences:
+        sentence = restore_abbreviations(sentence, replacements)
+        sentence = sentence.strip()
+        # Basic filter for empty strings or strings containing only numbers
+        if sentence and not re.match(r'^\d+$', sentence):
+            # Re-add the period if it's missing (common after split)
+            if not re.search(r'[.!?]$', sentence):
+                 sentence += "."
+            # Ensure no internal newlines remain
+            sentence = re.sub(r'\s*\n\s*', ' ', sentence)
+            sentence = re.sub(r'\s+', ' ', sentence).strip()
+            if sentence: # Final check for empty string after cleaning
+                sentences.append(sentence)
+    return sentences
+
+def _ensure_punctuation_and_capitalization(text: str) -> str:
+    """Ensures the text ends with basic punctuation and starts with a capital letter."""
+    text = text.strip()
+    if not text:
+        return ""
+
+    # Capitalize the first letter
+    if text[0].islower():
+        if text.startswith(('"', "'")) and len(text) > 1:
+            # Capitalize the first actual letter inside quotes
+            text = text[0] + text[1].upper() + text[2:]
         else:
-            initial_sentences = sentence_detector(protected_text)
-            print(f"[INFO] Đã tách thành {len(initial_sentences)} câu với detector cơ bản")
-            
-        # Khôi phục từ ghép
-        initial_sentences = [restore_hyphenated_words(s, replacements) for s in initial_sentences]
-        
-        # Bước 3: Phát hiện và kết hợp các câu fragment
-        combined_sentences = combine_sentence_fragments(initial_sentences)
-        print(f"[INFO] Đã kết hợp thành {len(combined_sentences)} câu hoàn chỉnh")
-        
-        # Bước 4: Với mỗi câu dài, tách thành các mệnh đề có ý nghĩa
-        refined_sentences = []
-        for sentence in combined_sentences:
-            # Với câu ngắn, giữ nguyên
-            if len(sentence.split()) < 15:
-                refined_sentences.append(sentence)
-                continue
-                
-            # Với câu dài, sử dụng spaCy để tách có kiểm soát (nếu được yêu cầu)
-            if use_spacy and nlp is not None:
-                # Tách câu với spaCy, giữ cấu trúc ngữ pháp
-                try:
-                    sub_sentences = extract_meaningful_clauses(sentence)
-                    # Thêm cả câu gốc và câu con
-                    refined_sentences.append(sentence)  # Giữ câu gốc
-                    refined_sentences.extend(sub_sentences)  # Thêm các mệnh đề con
-                except Exception as e:
-                    print(f"[WARNING] Lỗi khi tách mệnh đề: {e}")
-                    refined_sentences.append(sentence)
+            text = text[0].upper() + text[1:]
+
+    # Add a period if no ending punctuation is found
+    if not re.search(r'[.!?]$', text):
+        text += '.'
+    return text
+
+# Renamed from simplify_sentence_for_oie for broader applicability
+def simplify_complex_sentence(sentence: str) -> List[str]:
+    """
+    Simplifies a complex sentence into potentially multiple simpler clauses using rule-based methods.
+    This version is conservative, aiming to avoid creating incorrect fragments.
+    (Version 3 - Conservative)
+    """
+    sentence = sentence.strip()
+    # Use the combined function for ensuring format
+    original_sentence_with_punct = _ensure_punctuation_and_capitalization(sentence)
+
+    # Remove ending punctuation for internal processing
+    is_question = sentence.endswith('?')
+    if sentence.endswith(('.', '?')):
+        sentence = sentence[:-1].strip()
+
+    MIN_WORDS_FOR_SIMPLIFICATION = 6
+    if not sentence or len(sentence.split()) < MIN_WORDS_FOR_SIMPLIFICATION:
+        return [original_sentence_with_punct]
+
+    simplified_clauses = []
+
+    # Rule 0: Do not split questions
+    wh_words = ["who", "what", "where", "when", "why", "how", "which"]
+    if is_question or any(sentence.lower().startswith(wh + " ") for wh in wh_words):
+        return [original_sentence_with_punct]
+
+    # Rule 1: Split by semicolon if both parts seem clausal (>= 3 words)
+    clauses_sc = [c.strip() for c in sentence.split(';') if c.strip()]
+    if len(clauses_sc) > 1 and all(len(c.split()) >= 3 for c in clauses_sc):
+        # Avoid splitting if the second part is just a connector adverb
+        if len(clauses_sc[1].split()) == 1 and clauses_sc[1].lower() in ['alternatively', 'however', 'therefore', 'moreover']:
+             pass # Do not split
+        else:
+            # No deep recursion here to keep it simple and avoid errors
+            simplified_clauses.extend(clauses_sc)
+            if len(simplified_clauses) > 1:
+                 # Apply final formatting to each part
+                 return [_ensure_punctuation_and_capitalization(s) for s in simplified_clauses if s]
+
+    # Rule 2: Non-restrictive relative clauses (after comma + which/who)
+    match_rel = re.search(r'(?P<main>.*?),\s+(?P<rel_pron>which|who)\s+(?P<rel_clause>[^"]*)', sentence, re.IGNORECASE)
+    if match_rel:
+        main_part = match_rel.group('main').strip()
+        rel_clause_content = match_rel.group('rel_clause').strip()
+        rel_pron = match_rel.group('rel_pron')
+        main_words = main_part.split()
+        antecedent_phrase = ""
+        # Try to get a noun phrase as antecedent
+        if len(main_words) >= 2 and main_words[-2].lower() in ["a", "an", "the", "his", "her", "its", "their", "some", "many", "this", "that", "these", "those"]:
+             antecedent_phrase = " ".join(main_words[-2:])
+        elif main_words:
+             antecedent_phrase = main_words[-1]
+        if antecedent_phrase and antecedent_phrase.endswith((',', ';', ':')):
+            antecedent_phrase = antecedent_phrase[:-1].strip()
+
+        if antecedent_phrase:
+            reconstructed_rel = ""
+            rel_clause_words = rel_clause_content.split()
+            verb_starts = ['is', 'was', 'are', 'were', 'has', 'had', 'can', 'could', 'may', 'might', 'will', 'would', 'should']
+            # Reconstruct only if it seems grammatically plausible
+            if rel_clause_words and rel_clause_words[0].lower() in verb_starts:
+                 reconstructed_rel = f"{antecedent_phrase} {rel_clause_content}"
+            elif rel_clause_words and rel_pron.lower() == 'who' and len(rel_clause_words) > 1:
+                 reconstructed_rel = f"{antecedent_phrase} {rel_clause_content}"
+
+            # Split only if reconstructed part is valid and main part is long enough
+            if reconstructed_rel and len(reconstructed_rel.split()) >= 3 and len(main_part.split()) >= 3:
+                 simplified_clauses.append(main_part)
+                 simplified_clauses.append(reconstructed_rel)
+                 return [_ensure_punctuation_and_capitalization(s) for s in simplified_clauses if s]
             else:
-                refined_sentences.append(sentence)
-        
-        # Bước 5: Lọc câu dư thừa và vô nghĩa
-        filtered_sentences = filter_sentences_for_oie(refined_sentences, min_words)
-        
-        # Loại bỏ trùng lặp nhưng giữ nguyên thứ tự
-        seen = set()
-        result_sentences = []
-        for s in filtered_sentences:
-            if s not in seen:
-                seen.add(s)
-                result_sentences.append(s)
-                
-        print(f"[INFO] Kết quả cuối cùng: {len(result_sentences)} câu tối ưu cho OIE")
-    
-    except Exception as e:
-        print(f"[WARNING] Lỗi khi tách câu: {e}")
-        print("[INFO] Sử dụng phương pháp cơ bản làm dự phòng")
-        result_sentences = sentence_detector(passage)
-    
-    return result_sentences
+                 # Fallback: return only the main part if reconstruction is uncertain
+                 simplified_clauses.append(main_part)
+                 return [_ensure_punctuation_and_capitalization(s) for s in simplified_clauses if s]
 
-def combine_sentence_fragments(sentences):
-    """Kết hợp các fragments thành câu hoàn chỉnh"""
-    if not sentences:
-        return []
-        
-    results = []
-    current_sentence = sentences[0]
-    
-    for i in range(1, len(sentences)):
-        current = current_sentence.strip()
-        next_s = sentences[i].strip()
-        
-        # Kiểm tra fragment không hoàn chỉnh
-        is_fragment = (
-            # Kết thúc bởi dấu phẩy
-            current.endswith(',') or
-            # Không có động từ chính
-            not any(word in current.lower() for word in ['is', 'are', 'was', 'were', 'have', 'has', 'had', 'do', 'does', 'did']) or
-            # Fragment điển hình
-            re.match(r'^(in|on|at|by|with|as|if|when|but)\s', next_s) or
-            # Câu quá ngắn (< 5 từ) và kết thúc bằng dấu phẩy
-            (len(current.split()) < 5 and current.endswith(','))
-        )
-        
-        if is_fragment:
-            # Kết hợp với câu tiếp theo
-            current_sentence = f"{current} {next_s}"
-        else:
-            # Hoàn thành một câu, bắt đầu câu mới
-            results.append(current_sentence)
-            current_sentence = next_s
-    
-    # Thêm câu cuối
-    if current_sentence:
-        results.append(current_sentence)
-        
-    return results
+    # Rule 3: Coordinating conjunctions after a comma (and, but, or)
+    parts_coord = re.split(r'(,\s*(?:and|but|or)\s+)', sentence, maxsplit=1)
+    if len(parts_coord) == 3:
+        clause1 = parts_coord[0].strip()
+        clause2 = parts_coord[2].strip()
+        # Split only if both parts seem like valid clauses
+        if len(clause1.split()) >= 3 and len(clause2.split()) >= 3:
+            simplified_clauses.append(clause1)
+            simplified_clauses.append(clause2)
+            return [_ensure_punctuation_and_capitalization(s) for s in simplified_clauses if s]
 
-def extract_meaningful_clauses(sentence):
-    """Trích xuất các mệnh đề có ý nghĩa từ câu phức tạp"""
-    doc = nlp(sentence)
-    clauses = []
-    
-    # Tìm các mệnh đề chính và phụ
-    for token in doc:
-        # Tìm vị ngữ chính
-        if token.dep_ in ('ROOT', 'ccomp', 'xcomp', 'advcl', 'relcl') and token.pos_ == 'VERB':
-            # Xây dựng mệnh đề
-            clause_tokens = list(token.subtree)
-            
-            # Sắp xếp theo vị trí trong câu
-            clause_tokens.sort(key=lambda t: t.i)
-            
-            # Tạo chuỗi mệnh đề
-            clause_text = ' '.join(t.text for t in clause_tokens)
-            
-            # Kiểm tra xem mệnh đề có ý nghĩa không (đủ dài)
-            if len(clause_text.split()) >= 4:
-                clauses.append(clause_text)
-    
-    # Tìm cụm danh ngữ quan trọng (có thể chứa thông tin)
-    for chunk in doc.noun_chunks:
-        if len(chunk.text.split()) >= 4 and any(token.pos_ == 'VERB' for token in chunk.root.children):
-            if chunk.text not in clauses:
-                clauses.append(chunk.text)
-                
-    return clauses
+    # Rule 4: Nested 'that' clauses with 'or that'
+    match_nested_that = re.search(r'^(?P<prefix>.*\s(?:maintain|believe|suggest|think|argue|state|say|show)\s+that\s+)(?P<clauseA>.*?)\s+or\s+that\s+(?P<clauseB>.*)$', sentence, re.IGNORECASE)
+    if match_nested_that:
+        prefix = match_nested_that.group('prefix').strip()
+        clauseA = match_nested_that.group('clauseA').strip()
+        clauseB = match_nested_that.group('clauseB').strip()
+        if clauseA and clauseB:
+             # Create two separate sentences repeating the prefix
+             simplified_clauses.append(f"{prefix} {clauseA}")
+             simplified_clauses.append(f"{prefix} {clauseB}")
+             return [_ensure_punctuation_and_capitalization(s) for s in simplified_clauses if s]
 
-def extract_triples_with_context(sentence, context=None):
+    # If no rules applied, return the original sentence, properly formatted
+    return [original_sentence_with_punct]
+
+# Renamed from apply_oie_simplification
+def apply_sentence_simplification(sentences: List[str]) -> List[str]:
+    """Applies simplification rules to a list of sentences and filters the results."""
+    simplified_list = []
+    for sentence in sentences:
+        # Apply simplification rules once per sentence
+        simplified_list.extend(simplify_complex_sentence(sentence))
+
+    # Post-processing: remove duplicates, very short sentences, ensure formatting
+    final_list = []
+    seen = set()
+    MIN_WORDS_FINAL = 4 # Minimum words for a sentence to be kept
+
+    for s in simplified_list:
+        # Ensure punctuation and capitalization
+        s_formatted = _ensure_punctuation_and_capitalization(s)
+        words = s_formatted.split()
+
+        if len(words) >= MIN_WORDS_FINAL and s_formatted not in seen:
+             # Filter out sentences that are just standalone conjunctions or markers
+             first_word_lower = words[0].lower().strip(',.;:')
+             standalone_conjunctions = ['and', 'but', 'or', 'so', 'yet', 'for', 'alternatively', 'however', 'therefore', 'moreover']
+             sub_markers_lower = [m.lower() for m in ["Because", "Since", "Although", "When", "While", "If", "Unless", "After", "Before", "Though", "As"]]
+             is_standalone_junk = (len(words) == 1 and first_word_lower in standalone_conjunctions + sub_markers_lower) or \
+                                  (len(words) == 2 and first_word_lower in sub_markers_lower)
+
+             if not is_standalone_junk:
+                 final_list.append(s_formatted)
+                 seen.add(s_formatted)
+    return final_list
+
+# Renamed from detect_sentences
+def extract_and_simplify_sentences(text: str, simplify: bool = False) -> List[str]:
     """
-    Trích xuất các triple (subject, relation, object) từ một câu với ngữ cảnh
-    
-    Args:
-        sentence: Câu cần trích xuất
-        context: Ngữ cảnh bổ sung (mặc định là None)
-        
-    Returns:
-        list: Danh sách các triple dạng {'subject': '...', 'relation': '...', 'object': '...'}
+    Extracts sentences from text, optionally applying simplification rules.
     """
-    # Nếu không có spaCy, trả về danh sách rỗng
-    if nlp is None:
-        return []
-    
-    triples = []
-    
-    # Phân tích câu với spaCy
-    doc = nlp(sentence)
-    
-    # Tìm các cấu trúc subject-verb-object
-    for token in doc:
-        # Tìm các động từ chính
-        if token.pos_ == 'VERB':
-            # Tìm chủ ngữ
-            subjects = [subj for subj in token.children if subj.dep_ in ('nsubj', 'nsubjpass')]
-            
-            # Tìm tân ngữ
-            objects = []
-            for child in token.children:
-                if child.dep_ in ('dobj', 'pobj', 'attr', 'acomp'):
-                    objects.append(child)
-                    # Mở rộng tân ngữ với các từ phụ thuộc
-                    objects.extend([gc for gc in child.children if gc.dep_ in ('conj', 'appos')])
-            
-            # Nếu tìm thấy cả chủ ngữ và tân ngữ
-            for subj in subjects:
-                # Mở rộng chủ ngữ
-                subj_span = [subj] + list(subj.subtree)
-                subj_span = sorted(set(subj_span), key=lambda x: x.i)
-                subject_text = ' '.join(t.text for t in subj_span if t.dep_ not in ('punct', 'cc'))
-                
-                # Xây dựng quan hệ (vị ngữ)
-                relation_tokens = [token]
-                for child in token.children:
-                    if child.dep_ in ('aux', 'auxpass', 'neg', 'prep', 'prt', 'advmod') and child.i > token.i:
-                        relation_tokens.append(child)
-                relation_tokens = sorted(relation_tokens, key=lambda x: x.i)
-                relation_text = ' '.join(t.text for t in relation_tokens)
-                
-                # Xử lý mỗi tân ngữ
-                for obj in objects:
-                    # Mở rộng tân ngữ
-                    obj_span = [obj] + list(obj.subtree)
-                    obj_span = sorted(set(obj_span), key=lambda x: x.i)
-                    object_text = ' '.join(t.text for t in obj_span if t.dep_ not in ('punct', 'cc'))
-                    
-                    # Tạo và thêm triple
-                    triple = {
-                        'subject': subject_text.strip(),
-                        'relation': relation_text.strip(),
-                        'object': object_text.strip()
-                    }
-                    
-                    triples.append(triple)
-    
-    return triples
+    paragraphs = split_into_paragraphs(text)
+    initial_sentences = []
+    for paragraph in paragraphs:
+        sentences = split_paragraph_into_sentences(paragraph)
+        initial_sentences.extend(sentences)
 
-def process_oie_in_groups(sentences, groups):
-    """Trích xuất OIE cho các câu trong nhóm, tận dụng ngữ cảnh chung"""
-    all_triples = []
-    sentence_triples = [[] for _ in range(len(sentences))]
-    
-    # Xử lý theo nhóm
-    for group_idx, group in enumerate(groups):
-        print(f"  Đang trích xuất quan hệ cho nhóm {group_idx+1}/{len(groups)}...")
-        
-        # Tạo ngữ cảnh chung cho nhóm
-        group_context = " ".join([sentences[idx] for idx in group])
-        
-        # Trích xuất triples cho từng câu với ngữ cảnh tốt hơn
-        for i, sentence_idx in enumerate(group):
-            sentence = sentences[sentence_idx]
-            
-            # Thêm tham số ngữ cảnh khi gọi hàm trích xuất
-            triples = extract_triples_with_context(sentence, group_context)
-            
-            # Lọc bỏ triples chất lượng thấp
-            filtered_triples = filter_low_quality_triples(triples)
-            
-            # Lưu trữ triples
-            sentence_triples[sentence_idx] = filtered_triples
-            all_triples.extend(filtered_triples)
-    
-    return all_triples, sentence_triples
+    # Basic cleaning
+    clean_initial_sentences = []
+    for sentence in initial_sentences:
+        clean_sentence = re.sub(r'\s*\n\s*', ' ', sentence).strip()
+        if clean_sentence:
+            # Ensure basic format even if not simplifying
+            clean_initial_sentences.append(_ensure_punctuation_and_capitalization(clean_sentence))
 
-def clause_has_svo(clause_tokens):
-    """
-    Kiểm tra xem một mệnh đề có cấu trúc Chủ ngữ-Động từ-Tân ngữ hay không
-    
-    Args:
-        clause_tokens: Danh sách các token trong mệnh đề
-        
-    Returns:
-        bool: True nếu có cấu trúc SVO, False nếu không
-    """
-    has_subject = any(token.dep_ in ('nsubj', 'nsubjpass') for token in clause_tokens)
-    has_verb = any(token.pos_ == 'VERB' for token in clause_tokens)
-    has_object = any(token.dep_ in ('dobj', 'pobj', 'attr', 'acomp') for token in clause_tokens)
-    
-    return has_subject and has_verb
+    if simplify:
+        # Apply simplification rules and filtering
+        final_sentences = apply_sentence_simplification(clean_initial_sentences)
+    else:
+        final_sentences = clean_initial_sentences # Already formatted
 
-def filter_low_quality_triples(triples):
-    """Lọc bỏ OIE triples chất lượng thấp"""
-    filtered = []
-    
-    for triple in triples:
-        # Kiểm tra subject
-        if not triple['subject'] or len(triple['subject'].split()) > 8:
-            continue
-            
-        # Kiểm tra relation
-        if not triple['relation'] or any(bad in triple['relation'] for bad in ['can can', 'are are', 'of are']):
-            continue
-            
-        # Kiểm tra object
-        if not triple['object']:
-            continue
-            
-        # Thêm triple hợp lệ
-        filtered.append(triple)
-    
-    return filtered
+    # Final check for empty strings
+    return [s for s in final_sentences if s]
 
-# Hàm main để kiểm tra khi chạy trực tiếp
-if __name__ == "__main__":
-    test_text = "Pascal Hardy, an engineer and sustainable development consultant, began experimenting with vertical farming and aeroponic growing towers - as the soil-free plastic tubes are known - on his Paris apartment block roof five years ago."
-    
-    print("\n=== Test with spaCy" + (" Transformer" if USING_TRANSFORMER else " Basic") + " Model ===")
-    original, sub_sentences = spacy_sentence_splitter(test_text)
-    
-    print("\nOriginal sentences:")
-    for i, s in enumerate(original):
-        print(f"{i+1}. {s}")
-    
-    print("\nSub-sentences:")
-    for i, s in enumerate(sub_sentences):
-        print(f"{i+1}. {s}")
-    
-    # Test hàm to_sentences mới
-    print("\n=== Test with Combined Approach ===")
-    combined_sentences = to_sentences(test_text, use_enhanced=True, use_spacy=True)
-    
-    print("\nCombined sentences:")
-    for i, s in enumerate(combined_sentences):
-        print(f"{i+1}. {s}")
-        
-    print("\n=== NHẬP TÀI LIỆU TRỰC TIẾP ===")
-    print("Nhập nội dung tài liệu (kết thúc bằng một dòng chỉ có '###'):")
+# --- UI Functions ---
+
+def get_text_from_user() -> str:
+    """Gets text input directly from the user."""
+    print("\nNhập nội dung văn bản (kết thúc bằng một dòng chỉ có '###'):")
     lines = []
     while True:
-        line = input()
-        if line == '###':
+        try:
+            line = input()
+            if line.strip() == '###':
+                break
+            lines.append(line)
+        except EOFError: # Handle Ctrl+D/Ctrl+Z
             break
-        lines.append(line)
-        
-    if not lines:
-        print("Không có nội dung được nhập, hủy phân tích.")
-        exit()
-        
-    document = "\n".join(lines)
-    
-    # Test với một ví dụ phức tạp hơn
-    complex_text = document
-    
-    print("\n=== Test Complex Example ===")
-    complex_sentences = to_sentences(complex_text)
-    
-    print("\nCombined sentences (complex):")
-    for i, s in enumerate(complex_sentences):
-        print(f"{i+1}. {s}")
+    return "\n".join(lines)
+
+def get_text_from_file() -> Tuple[str, str]:
+    """Gets text input from a file specified by the user."""
+    file_path = input("\nNhập đường dẫn đến file văn bản: ")
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            text = file.read()
+        print(f"Đã tải thành công văn bản từ {file_path}")
+        # Lấy tên file làm document_id
+        document_id = os.path.splitext(os.path.basename(file_path))[0]
+        return text, document_id
+    except FileNotFoundError:
+        print(f"Lỗi: Không tìm thấy tệp '{file_path}'")
+        return None, None
+    except Exception as e:
+        print(f"Lỗi khi đọc file: {e}")
+        return None, None
+
+def ask_yes_no(prompt: str, default_yes: bool = True) -> bool:
+    """Asks a yes/no question and returns a boolean."""
+    suffix = "[Y/n]" if default_yes else "[y/N]"
+    while True:
+        response = input(f"{prompt} {suffix}: ").strip().lower()
+        if not response:
+            return default_yes
+        if response in ['y', 'yes']:
+            return True
+        if response in ['n', 'no']:
+            return False
+        print("Vui lòng trả lời 'y' hoặc 'n'.")
+
+def process_and_output(text: str, document_id: str, simplify: bool):
+    """Processes the text and handles output based on user choice."""
+    if not text or not text.strip():
+        print("Không có văn bản nào để xử lý.")
+        return
+
+    print("\nĐang xử lý văn bản...")
+    start_time = datetime.datetime.now()
+
+    # --- Sentence Extraction and Simplification ---
+    all_sentences = extract_and_simplify_sentences(text, simplify=simplify)
+
+    end_time = datetime.datetime.now()
+    processing_time = (end_time - start_time).total_seconds()
+    print(f"Xử lý hoàn tất trong {processing_time:.4f} giây.")
+    print(f"Tìm thấy {len(all_sentences)} câu{' (đã đơn giản hóa)' if simplify else ''}.")
+
+    # --- Output Handling ---
+    save_output = ask_yes_no("\nBạn có muốn lưu kết quả ra file không?", default_yes=True)
+
+    if save_output:
+        default_filename = f"sentences_{document_id}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        output_filename = input(f"Nhập tên file đầu ra (mặc định: {default_filename}): ").strip()
+        if not output_filename:
+            output_filename = default_filename
+
+        output_dir = os.path.dirname(output_filename)
+        if output_dir and not os.path.exists(output_dir):
+            try:
+                os.makedirs(output_dir)
+                print(f"Đã tạo thư mục: {output_dir}")
+            except OSError as e:
+                 print(f"Lỗi khi tạo thư mục đầu ra '{output_dir}': {e}")
+                 # Continue, try writing in current directory
+
+        try:
+            with open(output_filename, 'w', encoding='utf-8') as f:
+                # Ghi thông tin cơ bản
+                f.write(f"===== KẾT QUẢ TÁCH CÂU =====\n\n")
+                f.write(f"Tài liệu: {document_id}\n")
+                f.write(f"Thời gian xử lý: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Thời gian thực hiện: {processing_time:.4f} giây\n")
+                f.write(f"Chế độ đơn giản hóa: {'Bật' if simplify else 'Tắt'}\n\n")
+                f.write(f"Tổng số câu: {len(all_sentences)}\n")
+                f.write(f"Độ dài văn bản gốc: {len(text)} ký tự\n\n")
+                f.write(f"===== DANH SÁCH CÂU =====\n\n")
+
+                for i, sentence in enumerate(all_sentences):
+                    f.write(f"{i+1}. {sentence}\n")
+
+            print(f"\nĐã lưu kết quả vào file: {output_filename}")
+
+        except IOError as e:
+            print(f"\nLỗi khi ghi vào tệp đầu ra '{output_filename}': {e}")
+            print("\n--- Kết quả (in ra console do lỗi ghi file) ---")
+            for i, sentence in enumerate(all_sentences):
+                print(f"{i+1}. {sentence}")
+    else:
+        # Hiển thị trên console
+        print(f"\n--- Kết quả ---")
+        for i, sentence in enumerate(all_sentences):
+            print(f"{i+1}. {sentence}")
+
+# --- Main Menu ---
+def main_menu():
+    """Displays the main menu and handles user interaction."""
+    while True:
+        print("\n=== SENTENCE DETECTOR & SIMPLIFIER ===")
+        print("1. Nhập văn bản trực tiếp")
+        print("2. Tải văn bản từ file")
+        print("3. Thoát")
+
+        choice = input("\nLựa chọn của bạn: ").strip()
+
+        text = None
+        document_id = "manual_input" # ID mặc định cho nhập trực tiếp
+
+        if choice == '1':
+            text = get_text_from_user()
+        elif choice == '2':
+            text, doc_id_from_file = get_text_from_file()
+            if doc_id_from_file: # Nếu tải file thành công, dùng tên file làm ID
+                document_id = doc_id_from_file
+        elif choice == '3':
+            print("Đang thoát...")
+            break
+        else:
+            print("Lựa chọn không hợp lệ, vui lòng chọn lại.")
+            continue
+
+        # Nếu có text để xử lý
+        if text is not None:
+            simplify_choice = ask_yes_no("\nBật chế độ đơn giản hóa câu?", default_yes=False)
+            process_and_output(text, document_id, simplify=simplify_choice)
+        else:
+            # Nếu get_text_from_file trả về None (lỗi đọc file)
+            print("Không thể xử lý do lỗi nhập liệu.")
+
+
+# Main execution block
+if __name__ == "__main__":
+    main_menu()
