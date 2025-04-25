@@ -905,7 +905,7 @@ if __name__ == "__main__":
         query = input("Nhập query hoặc chủ đề tài liệu (có thể để trống): ")
         
         # Xử lý tài liệu nhập trực tiếp
-        process_document(document, "Splitter_Tài_liệu_thủ_công", query=query, save_to_db=False)
+        process_document(document, "Splitter_InputDoc", query=query, save_to_db=False)
     
     elif choice == '3':
         # Tải tài liệu từ file

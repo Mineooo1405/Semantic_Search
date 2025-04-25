@@ -6,7 +6,7 @@ import json
 import pandas as pd
 from typing import List, Dict, Union, Optional, Callable
 from dotenv import load_dotenv
-from Tool.Sentence_Detector import sentence_detector, enhanced_sentence_detector, sentence_splitter_for_oie, spacy_sentence_splitter
+from Tool.Sentence_Detector import extract_and_simplify_sentences
 from Tool.Database import connect_to_db
 from Tool.OIE import extract_triples_for_search
 
@@ -28,7 +28,7 @@ def to_sentences(passage):
         list: Danh sách các câu đã được chia nhỏ
     """
     # Lấy ra câu đã chia nhỏ (phần tử thứ 2 của tuple)
-    _, sub_sentences = spacy_sentence_splitter(passage)
+    sub_sentences = extract_and_simplify_sentences(passage, simplify=True)
     return sub_sentences
 
 

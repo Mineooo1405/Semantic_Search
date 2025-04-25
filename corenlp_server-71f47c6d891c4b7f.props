@@ -1,0 +1,18 @@
+annotators = openie
+
+outputFormat = serialized
+
+serializer = edu.stanford.nlp.pipeline.ProtobufAnnotationSerializer
+
+openie.affinity_probability_cap = 0.5
+
+openie.triple.strict = False
+
+openie.max_entailments_per_clause = 5
+
+openie.resolve_coref = True
+
+openie.min_relation_length = 1
+
+timeout = 150000
+
