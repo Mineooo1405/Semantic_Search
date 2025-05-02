@@ -6,19 +6,22 @@ from dotenv import load_dotenv
 import os
 from Tool.Sentence_Detector import extract_and_simplify_sentences
 # Use the standard embedding function
-from Tool.Sentence_Embedding import sentence_embedding as embed_text_list
+from Tool.Sentence_Embedding import sentence_embedding as embed_text_list # Assuming this handles model loading
 from Tool.OIE import extract_triples_for_search # Keep for potential future use
 import matplotlib.pyplot as plt # Keep for potential future use
 import seaborn as sns # Keep for potential future use
 import time
 import pickle # Keep for potential future use
 import spacy # Keep for potential future use
+import nltk # For sentence tokenization
 import re
 import psycopg2 # Keep for potential future use
 from psycopg2 import extras as psycopg2_extras # Keep for potential future use
 from pgvector.psycopg2 import register_vector # Keep for potential future use
-import hashlib # Add hashlib
-from typing import List, Tuple, Dict, Union # Add typing
+import hashlib
+from typing import List, Tuple, Dict, Union, Optional # Added Optional
+import gc # <-- IMPORT GARBAGE COLLECTOR
+from sklearn.metrics.pairwise import cosine_similarity # <-- IMPORT cosine_similarity
 
 load_dotenv()
 
@@ -98,46 +101,83 @@ def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
     
     return vectors
 
-def create_semantic_matrix(vectors):
- 
-    vectors_array = np.array(vectors)
-    n = len(vectors_array)
-    similarity_matrix = np.zeros((n, n))
+# --- Helper function for batched embedding ---
+def embed_sentences_in_batches(sentences: List[str], model_name: str, batch_size: int = 32) -> Optional[np.ndarray]:
+    """Nhúng danh sách câu theo lô để giảm sử dụng bộ nhớ."""
+    if not sentences:
+        return None
+    all_embeddings = []
+    print(f"  Embedding {len(sentences)} sentences in batches of {batch_size}...") # Add print
+    try:
+        num_batches = (len(sentences) + batch_size - 1) // batch_size
+        for i in range(0, len(sentences), batch_size):
+            batch_num = (i // batch_size) + 1
+            print(f"    Embedding batch {batch_num}/{num_batches}...", end='\r')
+            batch = sentences[i:i+batch_size]
+            # Gọi hàm nhúng gốc, truyền model_name nếu cần
+            batch_embeddings = embed_text_list(batch, model_name=model_name) # Pass model_name
+            if batch_embeddings is not None:
+                 # Chuyển đổi sang numpy array nếu cần và giải phóng tensor gốc (nếu có)
+                 if hasattr(batch_embeddings, 'cpu'): # Check if it's a PyTorch tensor
+                     batch_embeddings = batch_embeddings.cpu().numpy()
+                 elif hasattr(batch_embeddings, 'numpy'): # Check if it's a TensorFlow tensor
+                     batch_embeddings = batch_embeddings.numpy()
 
-    # Hiển thị tiến độ tính toán
-    total_comparisons = n * n
-    completed = 0
-    start_time = time.time()
-    
-    for i in range(n):
-        vector_i = vectors_array[i]
-        norm_i = np.sqrt(np.sum(vector_i ** 2))
-        
-        for j in range(n):
-            vector_j = vectors_array[j]
-            
-            # Tính tích vô hướng (dot product)
-            dot_product = np.sum(vector_i * vector_j)
-            
-            # Tính độ dài (norm) của vector j
-            norm_j = np.sqrt(np.sum(vector_j ** 2))
-            
-            # Tránh chia cho 0
-            if norm_i == 0 or norm_j == 0:
-                similarity_matrix[i, j] = 0
-            else:
-                # Công thức tính cosine similarity
-                similarity_matrix[i, j] = dot_product / (norm_i * norm_j)
-            
-            completed += 1
-            if completed % (n * 5) == 0 or completed == total_comparisons:
-                elapsed = time.time() - start_time
-                progress = completed / total_comparisons
-                eta = (elapsed / progress) * (1 - progress) if progress > 0 else 0
-                print(f"Tiến độ: {completed}/{total_comparisons} ({progress*100:.1f}%) - ETA: {eta:.1f}s", end="\r")
-    
-    print(f"\nThống kê ma trận: min={similarity_matrix.min():.4f}, max={similarity_matrix.max():.4f}, mean={similarity_matrix.mean():.4f}")
-    return similarity_matrix
+                 all_embeddings.append(np.array(batch_embeddings))
+            # Giải phóng bộ nhớ batch trung gian (quan trọng)
+            del batch
+            del batch_embeddings
+            gc.collect() # Gọi GC sau mỗi batch
+
+        print(f"    Finished embedding {len(sentences)} sentences.         ") # Clear progress line
+
+        if not all_embeddings:
+            return None
+
+        embeddings_array = np.vstack(all_embeddings)
+        del all_embeddings # Giải phóng danh sách các batch embeddings
+        gc.collect()
+        return embeddings_array
+
+    except Exception as e:
+        print(f"\nError during batched embedding: {e}")
+        # Giải phóng bộ nhớ nếu có lỗi
+        if 'all_embeddings' in locals(): del all_embeddings
+        gc.collect()
+        return None
+
+# --- Modified create_semantic_matrix ---
+def create_semantic_matrix(sentences: List[str], model_name: str, batch_size_embed: int = 32) -> Optional[np.ndarray]:
+    """
+    Tạo ma trận tương đồng ngữ nghĩa giữa các câu, sử dụng embedding theo lô.
+    """
+    if len(sentences) < 2:
+        return None
+
+    # Nhúng câu theo lô
+    embeddings = embed_sentences_in_batches(sentences, model_name=model_name, batch_size=batch_size_embed)
+
+    if embeddings is None or embeddings.shape[0] != len(sentences):
+        print("  Error: Embedding failed or mismatch in number of embeddings.")
+        if 'embeddings' in locals() and embeddings is not None: del embeddings # Giải phóng nếu có lỗi
+        gc.collect()
+        return None
+
+    # Tính toán ma trận tương đồng cosine
+    print(f"  Calculating similarity matrix for {len(sentences)} sentences...")
+    try:
+        # Sử dụng hàm tối ưu của sklearn
+        sim_matrix = cosine_similarity(embeddings)
+        print("  Similarity matrix calculation complete.")
+        # Giải phóng bộ nhớ embeddings sau khi tính xong ma trận
+        del embeddings
+        gc.collect()
+        return sim_matrix
+    except Exception as e:
+        print(f"  Error calculating similarity matrix: {e}")
+        if 'embeddings' in locals() and embeddings is not None: del embeddings # Giải phóng nếu có lỗi
+        gc.collect()
+        return None
 
 def analyze_similarity_distribution(sim_matrix):
     """
@@ -151,7 +191,6 @@ def analyze_similarity_distribution(sim_matrix):
                       hoặc None nếu không có đủ dữ liệu.
     """
     if not isinstance(sim_matrix, np.ndarray) or sim_matrix.ndim != 2 or sim_matrix.shape[0] < 2:
-        # print("  Ma trận không hợp lệ hoặc quá nhỏ để phân tích.") # Optional: Keep if needed
         return None
 
     # Lấy các giá trị ở tam giác trên (không bao gồm đường chéo chính)
@@ -674,42 +713,60 @@ def export_results_to_file(document, sentences, groups, sentence_triples=None, d
 def semantic_chunk_passage_from_grouping_logic(
     doc_id: str,
     passage_text: str,
-    model_name: str = "thenlper/gte-large",
-    initial_threshold: Union[float, str] = 'auto',
+    model_name: str, # Model name is now crucial
+    initial_threshold: Union[str, float] = 'auto',
     decay_factor: float = 0.85,
-    min_threshold: Union[float, str] = 'auto',
+    min_threshold: Union[str, float] = 'auto',
     auto_percentiles: Tuple[int, int] = (85, 25),
-    **kwargs # Catch unused args
+    embedding_batch_size: int = 16, # <-- ADDED BATCH SIZE PARAMETER
+    **kwargs # Catch unused args like simplify if passed
 ) -> List[Tuple[str, str]]:
     """
-    Chunks a passage using the Semantic Grouping logic (spreading grouping).
-    Returns a list of (chunk_id, chunk_text).
+    Phân đoạn văn bản dựa trên nhóm ngữ nghĩa lan truyền, tối ưu hóa bộ nhớ.
+    Args:
+        # ... (các args khác giữ nguyên) ...
+        embedding_batch_size: Kích thước lô khi nhúng câu.
+    Returns:
+        List[Tuple[str, str]]: Danh sách các (chunk_id, chunk_text).
     """
     chunks_result = []
+    sentences = None # Initialize for finally block
+    sim_matrix = None
+    groups = None
+
     try:
-        # a. Split sentences
-        sentences = extract_and_simplify_sentences(passage_text, simplify=False)
+        # a. Tách câu (không simplify để giữ nguyên nội dung)
+        sentences = nltk.sent_tokenize(passage_text)
+        # sentences = extract_and_simplify_sentences(passage_text, simplify=False) # Use NLTK directly if simpler
         if not sentences: return []
-        if len(sentences) == 1: # Handle single sentence passage
+        if len(sentences) == 1: # Xử lý passage chỉ có 1 câu
             chunk_text = sentences[0]
-            chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:10]
-            chunk_id = f"{doc_id}_{chunk_hash}"
+            # Sử dụng hash an toàn hơn và có thể ngắn hơn
+            chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
+            chunk_id = f"{doc_id}_chunk0_hash{chunk_hash}"
+            # Giải phóng bộ nhớ câu
+            del sentences
+            gc.collect()
             return [(chunk_id, chunk_text)]
 
-        # b. Embed sentences
-        sentence_vectors = embed_text_list(sentences, model_name=model_name)
-        if sentence_vectors is None: return []
+        # b. Tạo ma trận tương đồng (SỬ DỤNG BATCH EMBEDDING)
+        sim_matrix = create_semantic_matrix(sentences, model_name=model_name, batch_size_embed=embedding_batch_size)
 
-        # c. Create similarity matrix
-        sim_matrix = create_semantic_matrix(sentence_vectors)
+        if sim_matrix is None:
+            print(f"  Skipping doc {doc_id} due to similarity matrix creation error.")
+            # Giải phóng bộ nhớ câu
+            del sentences
+            gc.collect()
+            return []
 
-        # d. Determine thresholds (if 'auto')
+        # c. Phân tích phân bố và xác định ngưỡng
+        stats = analyze_similarity_distribution(sim_matrix)
+        # ... (logic xác định initial_thresh, min_thresh từ stats hoặc giá trị cố định như cũ) ...
         current_initial_threshold = initial_threshold
         current_min_threshold = min_threshold
 
         if initial_threshold == 'auto' or min_threshold == 'auto':
-            percentiles = analyze_similarity_distribution(sim_matrix) # Don't pass sentences here
-            if not percentiles:
+            if not stats:
                  current_initial_threshold = 0.8 # Default fallback
                  current_min_threshold = 0.2   # Default fallback
                  print("  WARNING: Could not analyze distribution, using default thresholds (0.8, 0.2)")
@@ -719,56 +776,87 @@ def semantic_chunk_passage_from_grouping_logic(
                     initial_key, min_key = f'p{initial_p}', f'p{min_p}'
 
                     if initial_threshold == 'auto':
-                        current_initial_threshold = percentiles.get(initial_key, 0.8)
+                        current_initial_threshold = stats.get(initial_key, 0.8)
                     elif isinstance(initial_threshold, str): current_initial_threshold = float(initial_threshold)
 
                     if min_threshold == 'auto':
-                        current_min_threshold = percentiles.get(min_key, 0.2)
+                        current_min_threshold = stats.get(min_key, 0.2)
                     elif isinstance(min_threshold, str): current_min_threshold = float(min_threshold)
 
-                    # Ensure min < initial, adjust if necessary
+                    # Đảm bảo min < initial, điều chỉnh nếu cần
                     if current_min_threshold >= current_initial_threshold:
                         print(f"  WARNING: Auto min threshold ({current_min_threshold:.4f}) >= initial ({current_initial_threshold:.4f}). Adjusting min.")
-                        # Try a lower percentile or a fraction of initial
-                        lower_min_key = f'p{max(10, min_p - 15)}'
-                        if lower_min_key in percentiles:
-                            current_min_threshold = percentiles[lower_min_key]
-                        else:
-                            current_min_threshold = current_initial_threshold * 0.5
-                        current_min_threshold = max(0.1, current_min_threshold) # Ensure not too low
+                        lower_min_key = f'p{max(10, min_p - 15)}' # Thử percentile thấp hơn
+                        adjusted_min = stats.get(lower_min_key, current_initial_threshold * 0.5)
+                        current_min_threshold = max(0.1, adjusted_min) # Đảm bảo không quá thấp
                         print(f"  Adjusted min threshold: {current_min_threshold:.4f}")
 
                 except Exception as auto_err:
                     print(f"  ERROR determining auto thresholds: {auto_err}. Using defaults (0.8, 0.2).")
                     current_initial_threshold = 0.8 if initial_threshold == 'auto' else float(initial_threshold)
                     current_min_threshold = 0.2 if min_threshold == 'auto' else float(min_threshold)
-        # Ensure thresholds are float if provided as strings initially
-        elif isinstance(initial_threshold, str): current_initial_threshold = float(initial_threshold)
-        elif isinstance(min_threshold, str): current_min_threshold = float(min_threshold)
 
-        # Final check min < initial
+        # Đảm bảo ngưỡng là float nếu ban đầu là string
+        if isinstance(current_initial_threshold, str): current_initial_threshold = float(current_initial_threshold)
+        if isinstance(current_min_threshold, str): current_min_threshold = float(current_min_threshold)
+
+        # Kiểm tra cuối cùng min < initial
         if current_min_threshold >= current_initial_threshold:
              print(f"  WARNING: Final check failed: min ({current_min_threshold:.4f}) >= initial ({current_initial_threshold:.4f}). Setting min = initial * 0.5")
              current_min_threshold = max(0.1, current_initial_threshold * 0.5)
 
-        # e. Perform semantic grouping
+        # d. Thực hiện phân nhóm
+        print(f"  Grouping with thresholds: initial={current_initial_threshold:.4f}, min={current_min_threshold:.4f}")
         groups = semantic_spreading_grouping(
             sim_matrix,
             current_initial_threshold,
             decay_factor,
             current_min_threshold
         )
+        print(f"  Grouped into {len(groups)} chunks.")
 
-        # f. Create chunks from groups
-        for group_idx, group in enumerate(groups):
-            chunk_sentences = [sentences[sent_idx] for sent_idx in group]
+        # Giải phóng ma trận tương đồng sau khi phân nhóm xong
+        del sim_matrix
+        sim_matrix = None # Explicitly set to None
+        gc.collect()
+
+        # e. Tạo chunks từ groups
+        for i, group_indices in enumerate(groups):
+            if not group_indices: continue
+            # Sắp xếp chỉ số để đảm bảo thứ tự câu trong chunk
+            sorted_indices = sorted(group_indices)
+            chunk_sentences = [sentences[idx] for idx in sorted_indices]
             chunk_text = " ".join(chunk_sentences).strip()
             if chunk_text:
-                chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:10]
-                chunk_id = f"{doc_id}_{chunk_hash}_{group_idx}" # Add group_idx for uniqueness
+                # Tạo hash an toàn hơn
+                try:
+                    text_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
+                except Exception:
+                    text_hash = "nohash" # Fallback
+                chunk_id = f"{doc_id}_chunk{i}_hash{text_hash}"
                 chunks_result.append((chunk_id, chunk_text))
+            # Giải phóng bộ nhớ trung gian
+            del chunk_sentences
+            del chunk_text
+            del sorted_indices
+
+        # Giải phóng bộ nhớ câu và nhóm
+        del sentences
+        sentences = None
+        del groups
+        groups = None
+        gc.collect() # Gọi GC lần cuối trước khi trả về
+
+        return chunks_result
 
     except Exception as e:
-        print(f"Error chunking doc {doc_id} with Semantic Grouping: {e}")
-    return chunks_result
+        print(f"\nError processing document {doc_id} in semantic_chunk_passage_from_grouping_logic: {e}")
+        import traceback
+        traceback.print_exc()
+        # Cố gắng giải phóng bộ nhớ nếu có lỗi
+        if sentences is not None: del sentences
+        if sim_matrix is not None: del sim_matrix
+        if groups is not None: del groups
+        gc.collect()
+        return []
 
