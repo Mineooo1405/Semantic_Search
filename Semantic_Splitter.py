@@ -1,19 +1,23 @@
 import pandas as pd
-from Tool.Database import connect_to_db
-import json
+# from Tool.Database import connect_to_db # Not needed for chunking function
+import json # Not needed for chunking function
 import numpy as np
 from dotenv import load_dotenv
 import os
+from typing import List, Tuple # Adjusted typing import
 from Tool.Sentence_Detector import extract_and_simplify_sentences
-from Tool.Sentence_Embedding import sentence_embedding
-from Tool.OIE import extract_triples_for_search
+# --- Use the standard embedding function ---
+from Tool.Sentence_Embedding import sentence_embedding as embed_text_list_tool
+# from Tool.OIE import extract_triples_for_search # Not needed for chunking function
 import re
-import matplotlib.pyplot as plt
-import seaborn as sns
-import time
-import pickle
-import spacy
-
+import matplotlib.pyplot as plt # Not needed for chunking function
+import seaborn as sns # Not needed for chunking function
+import time # Not needed for chunking function
+import pickle # Not needed for chunking function
+# import spacy # Not needed for chunking function
+import hashlib
+from Tool.Database import connect_to_db # Not needed for chunking function
+from Tool.OIE import extract_triples_for_search # Not needed for chunking function
 load_dotenv()
 
 def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
@@ -39,7 +43,7 @@ def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
             eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
             print(f"Đang tạo vector [{i+1}/{total}] - {(i+1)/total*100:.1f}% - ETA: {eta:.1f}s", end="\r")
         
-        vectors.append(sentence_embedding(sentence))
+        vectors.append(embed_text_list_tool(sentence))
     
     print("\nĐã hoàn thành tạo vector!")
     
@@ -856,76 +860,80 @@ def extract_triples(sentences):
     
     return all_triples, sentence_triples
 
+# --- HÀM MỚI ĐỂ CHUNKING PASSAGE ---
+def chunk_passage_semantic_splitter(
+    doc_id: str,
+    passage_text: str,
+    model_name: str = "thenlper/gte-large", # Thêm model_name để nhúng
+    initial_threshold: float = 0.6,
+    decay_factor: float = 0.95,
+    min_threshold: float = 0.35,
+    min_chunk_len: int = 2,
+    max_chunk_len: int = 8,
+    window_size: int = 3,
+    **kwargs # Bắt các tham số không dùng đến
+) -> List[Tuple[str, str]]:
+    """
+    Chunk một passage sử dụng logic Semantic Splitter (semantic_sequential_spreading).
 
-if __name__ == "__main__":
-    print("1. Xử lý passages từ tập dữ liệu")
-    print("2. Phân tích tài liệu tự nhập")
-    print("3. Phân tích tài liệu từ file")
-    
-    choice = input("\nLựa chọn của bạn (1/2/3): ")
-    
-    if choice == '1':
-        # Đọc dataset
-        doc = pd.read_csv('passages_1000.csv')
-        passages = doc['passage_text'].tolist()
-        
-        # Lấy số lượng passages cần xử lý từ người dùng
-        while True:
-            try:
-                num_passages = int(input("Nhập số passages cần xử lý (1-1000): "))
-                if 1 <= num_passages <= 1000:
-                    break
-                else:
-                    print("Số lượng phải nằm trong khoảng từ 1 đến 1000.")
-            except ValueError:
-                print("Vui lòng nhập một số nguyên.")
-        
-        # Giới hạn số lượng passages
-        passages_to_process = passages[:min(num_passages, len(passages))]
-        
-        for i, passage in enumerate(passages_to_process):
-            process_document(passage, f"Passage {i+1}", query=f"Query for passage {i+1}")
-    
-    elif choice == '2':
-        # Nhập tài liệu trực tiếp
-        print("\n=== NHẬP TÀI LIỆU TRỰC TIẾP ===")
-        print("Nhập nội dung tài liệu (kết thúc bằng một dòng chỉ có '###'):")
-        lines = []
-        while True:
-            line = input()
-            if line == '###':
-                break
-            lines.append(line)
-        
-        if not lines:
-            print("Không có nội dung được nhập, hủy phân tích.")
-            exit()
-        
-        document = "\n".join(lines)
-        query = input("Nhập query hoặc chủ đề tài liệu (có thể để trống): ")
-        
-        # Xử lý tài liệu nhập trực tiếp
-        process_document(document, "Splitter_InputDoc", query=query, save_to_db=False)
-    
-    elif choice == '3':
-        # Tải tài liệu từ file
-        file_path = input("\nNhập đường dẫn đến file tài liệu: ")
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                document = file.read()
-            print(f"Đã tải thành công tài liệu từ {file_path}")
-            
-            # Lấy tên file làm document_id
-            import os
-            document_id = os.path.splitext(os.path.basename(file_path))[0]
-            
-            query = input("Nhập query hoặc chủ đề tài liệu (có thể để trống): ")
-            
-            # Xử lý tài liệu từ file
-            process_document(document, f"Splitter_{document_id}", query=query, save_to_db=False)
-            
-        except Exception as e:
-            print(f"Lỗi khi đọc file: {e}")
-    
-    else:
-        print("Lựa chọn không hợp lệ.")
+    Args:
+        doc_id (str): ID của document gốc.
+        passage_text (str): Nội dung của passage.
+        model_name (str): Tên model embedding.
+        initial_threshold (float): Ngưỡng ban đầu.
+        decay_factor (float): Hệ số giảm ngưỡng.
+        min_threshold (float): Ngưỡng tối thiểu.
+        min_chunk_len (int): Số câu tối thiểu trong chunk.
+        max_chunk_len (int): Số câu tối đa trong chunk.
+        window_size (int): Kích thước cửa sổ xem xét xu hướng.
+
+    Returns:
+        List[Tuple[str, str]]: Danh sách các tuple (chunk_id, chunk_text).
+    """
+    chunks_result = []
+    try:
+        # a. Tách câu
+        sentences = extract_and_simplify_sentences(passage_text, simplify=False) # Dùng simplify=False để giữ nguyên câu gốc
+        if not sentences:
+            return []
+        if len(sentences) == 1: # Nếu chỉ có 1 câu, coi đó là 1 chunk
+            chunk_text = sentences[0]
+            chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:10]
+            chunk_id = f"{doc_id}_{chunk_hash}"
+            return [(chunk_id, chunk_text)]
+
+        # b. Tạo embedding cho câu (Sử dụng hàm import từ Tool)
+        # Lưu ý: Hàm to_vectors gốc trong file này có thể khác,
+        # nên dùng hàm chuẩn hóa từ Tool nếu có thể.
+        # Giả sử dùng hàm sentence_embedding từ Tool
+        from Tool.Sentence_Embedding import sentence_embedding as embed_text_list_tool
+        sentence_vectors = embed_text_list_tool(sentences, model_name=model_name)
+        if sentence_vectors is None: return []
+
+        # c. Tạo ma trận tương đồng
+        sim_matrix = create_semantic_matrix(sentence_vectors) # Dùng hàm trong file này
+
+        # d. Phân đoạn tuần tự
+        # Lưu ý: Hàm này không có chế độ 'auto', cần truyền giá trị cụ thể
+        segments = semantic_sequential_spreading(
+            sentences, sim_matrix,
+            initial_threshold=initial_threshold,
+            decay_factor=decay_factor,
+            min_threshold=min_threshold,
+            min_chunk_len=min_chunk_len,
+            max_chunk_len=max_chunk_len,
+            window_size=window_size
+        )
+
+        # e. Tạo chunk từ các đoạn
+        for segment_idx, segment in enumerate(segments):
+            chunk_sentences = [sentences[sent_idx] for sent_idx in segment]
+            chunk_text = " ".join(chunk_sentences).strip()
+            if chunk_text:
+                chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:10]
+                chunk_id = f"{doc_id}_{chunk_hash}_{segment_idx}" # Thêm segment_idx để tránh trùng hash
+                chunks_result.append((chunk_id, chunk_text))
+
+    except Exception as e:
+        print(f"Error chunking doc {doc_id} with Semantic Splitter: {e}")
+    return chunks_result

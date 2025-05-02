@@ -2,7 +2,12 @@ import os
 from dotenv import load_dotenv
 from openie import StanfordOpenIE
 import re
-
+corenlp_path = r'D:/path/to/your/stanford-corenlp-4.5.6' # Ví dụ đường dẫn
+if 'CORENLP_HOME' not in os.environ and os.path.exists(corenlp_path):
+    os.environ['CORENLP_HOME'] = corenlp_path
+    print(f"[INFO] Đã đặt CORENLP_HOME='{corenlp_path}'")
+elif 'CORENLP_HOME' not in os.environ:
+    print("[WARNING] Biến môi trường CORENLP_HOME chưa được đặt và đường dẫn mặc định không tồn tại. OpenIE có thể không hoạt động.")
 load_dotenv()
 
 def extract_triples(text, properties=None, enhanced=False):

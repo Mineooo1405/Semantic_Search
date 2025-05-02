@@ -20,3 +20,12 @@ pip install ast #use for dataset processing
 
 #run sentence detector
 python Sentence_Detector.py -i input.txt -o report_oie.txt --simplify -f
+
+embedding: ollama | Bert model | Gemini | AWS Bedroc 
+IR Matchzoo
+
+revised chunk with OIE'
+revised query
+
+pip install beir nltk pandas tqdm psycopg2-binary python-dotenv matplotlib seaborn spacy pgvector sentence-transformers
+python -m spacy download en_core_web_sm

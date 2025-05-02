@@ -1,18 +1,24 @@
 import pandas as pd
-from Tool.Database import connect_to_db
+from Tool.Database import connect_to_db # Keep for potential future use, but not for chunking function
 import json
 import numpy as np
 from dotenv import load_dotenv
 import os
 from Tool.Sentence_Detector import extract_and_simplify_sentences
-from Tool.Sentence_Embedding import sentence_embedding
-from Tool.OIE import extract_triples_for_search  # Thêm import OIE
-import matplotlib.pyplot as plt
-import seaborn as sns
+# Use the standard embedding function
+from Tool.Sentence_Embedding import sentence_embedding as embed_text_list
+from Tool.OIE import extract_triples_for_search # Keep for potential future use
+import matplotlib.pyplot as plt # Keep for potential future use
+import seaborn as sns # Keep for potential future use
 import time
-import pickle
-import spacy
+import pickle # Keep for potential future use
+import spacy # Keep for potential future use
 import re
+import psycopg2 # Keep for potential future use
+from psycopg2 import extras as psycopg2_extras # Keep for potential future use
+from pgvector.psycopg2 import register_vector # Keep for potential future use
+import hashlib # Add hashlib
+from typing import List, Tuple, Dict, Union # Add typing
 
 load_dotenv()
 
@@ -78,7 +84,7 @@ def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
             eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
             print(f"Đang tạo vector [{i+1}/{total}] - {(i+1)/total*100:.1f}% - ETA: {eta:.1f}s", end="\r")
         
-        vectors.append(sentence_embedding(sentence))
+        vectors.append(embed_text_list(sentence))
     
     print("\nĐã hoàn thành tạo vector!")
     
@@ -133,163 +139,134 @@ def create_semantic_matrix(vectors):
     print(f"\nThống kê ma trận: min={similarity_matrix.min():.4f}, max={similarity_matrix.max():.4f}, mean={similarity_matrix.mean():.4f}")
     return similarity_matrix
 
-def analyze_similarity_distribution(similarity_matrix, sentences=None):
-    """Phân tích phân bố relationship và đưa ra đề xuất threshold"""
-    n = len(similarity_matrix)
-    similarity_pairs = []
-    
-    # Lấy các giá trị relationship của các cặp khác nhau (loại bỏ đường chéo)
-    for i in range(n):
-        for j in range(i+1, n):  # Chỉ lấy nửa trên của ma trận (không tính đường chéo)
-            similarity_pairs.append((i, j, similarity_matrix[i][j]))
-    
-    # Sắp xếp các cặp câu theo relationship giảm dần
-    similarity_pairs.sort(key=lambda x: x[2], reverse=True)
-    
-    # Hiển thị các cặp câu và relationship của chúng
-    print("\nCác cặp câu và relationship (sắp xếp theo relationship giảm dần):")
-    for i, j, sim in similarity_pairs[:20]:  # Hiển thị 20 cặp đầu tiên
-        if sentences:
-            sentence_i = sentences[i].replace("\n", " ").strip()
-            sentence_j = sentences[j].replace("\n", " ").strip()
-            
-            sentence_i = sentences[i][:30] + "..." if len(sentences[i]) > 30 else sentences[i]
-            sentence_j = sentences[j][:30] + "..." if len(sentences[j]) > 30 else sentences[j]
-            print(f"Câu {i} và câu {j}: {sim:.4f} - [{sentence_i}] và [{sentence_j}]")
-        else:
-            print(f"Câu {i} và câu {j}: {sim:.4f}")
-            
-    if len(similarity_pairs) > 20:
-        print(f"... và {len(similarity_pairs)-20} cặp khác")
+def analyze_similarity_distribution(sim_matrix):
+    """
+    Phân tích phân bố độ tương đồng trong ma trận, bỏ qua giá trị 1.0.
 
-    # Chuyển danh sách relationship thành mảng numpy để phân tích
-    similarities = np.array([sim for _, _, sim in similarity_pairs])
-    
-    # Phân tích phân bố
+    Args:
+        sim_matrix: Ma trận numpy chứa độ tương đồng cosine.
+
+    Returns:
+        dict or None: Dictionary chứa các thống kê (min, max thực tế < 1, mean, std, percentiles)
+                      hoặc None nếu không có đủ dữ liệu.
+    """
+    if not isinstance(sim_matrix, np.ndarray) or sim_matrix.ndim != 2 or sim_matrix.shape[0] < 2:
+        # print("  Ma trận không hợp lệ hoặc quá nhỏ để phân tích.") # Optional: Keep if needed
+        return None
+
+    # Lấy các giá trị ở tam giác trên (không bao gồm đường chéo chính)
+    upper_triangle_indices = np.triu_indices_from(sim_matrix, k=1)
+    similarities = sim_matrix[upper_triangle_indices]
+
+    # --- MODIFICATION START: Filter out values close to 1.0 ---
+    # Lọc bỏ các giá trị rất gần hoặc bằng 1.0
+    # Sử dụng một ngưỡng nhỏ để tránh vấn đề dấu phẩy động
+    epsilon = 1e-5
+    filtered_similarities = similarities[similarities < (1.0 - epsilon)]
+    # --- MODIFICATION END ---
+
+    if filtered_similarities.size == 0:
+        # print("  Không có đủ cặp câu (với similarity < 1.0) để phân tích phân bố.") # Optional: Keep if needed
+        # Có thể trả về giá trị mặc định hoặc None tùy theo cách xử lý ở nơi gọi
+        # Nếu tất cả các cặp đều có sim = 1.0, có thể coi đây là một khối duy nhất
+        # Trả về stats dựa trên giá trị gốc nếu muốn, hoặc None
+        if similarities.size > 0: # Nếu có giá trị gốc nhưng tất cả đều là 1.0
+             original_max = np.max(similarities) # Sẽ là 1.0
+             return {
+                'min': original_max, 'max': original_max, 'mean': original_max, 'std': 0.0,
+                **{f'p{p}': original_max for p in [10, 25, 50, 75, 80, 85, 90, 95]}
+             }
+        return None # Trường hợp không có cặp nào ban đầu
+
+    # Tính toán thống kê trên các giá trị đã lọc
     percentiles = {
-        '10%': np.percentile(similarities, 10),
-        '25%': np.percentile(similarities, 25),
-        'median': np.median(similarities),
-        '75%': np.percentile(similarities, 75),
-        '90%': np.percentile(similarities, 90)
+        f'p{p}': np.percentile(filtered_similarities, p) for p in [10, 25, 50, 75, 80, 85, 90, 95]
+    }
+    stats = {
+        'min': np.min(filtered_similarities),
+        'max': np.max(filtered_similarities), # Max thực tế < 1.0
+        'mean': np.mean(filtered_similarities),
+        'std': np.std(filtered_similarities),
+        **percentiles
     }
 
-    # Đề xuất threshold
-    print("\nĐề xuất threshold relationship (threshold):")
-    print(f"  threshold nghiêm ngặt (ít nhóm hơn): {percentiles['90%']:.4f}")
-    print(f"  threshold cân bằng: {percentiles['75%']:.4f}")
-    print(f"  threshold thoải mái (nhiều nhóm hơn): {percentiles['median']:.4f}")
-    
-    return percentiles
+    # Các lệnh print đã được comment out ở bước trước
+    # print("\nPhân bố độ tương đồng (giữa các câu khác nhau, sim < 1.0):")
+    # ... (print logic) ...
 
-def semantic_spreading_grouping(similarity_matrix, initial_threshold=0.75, decay_factor=0.9, min_threshold=0.2):
-    """
-    Thực hiện phân nhóm bằng giải thuật semantic spreading (greeding) với threshold giảm dần
-    
-    Args:
-        similarity_matrix: Ma trận relationship
-        initial_threshold: threshold  ban đầu
-        decay_factor: Hệ số giảm threshold sau mỗi nhóm (0.9 = giảm 10%)
-        min_threshold: threshold relationship tối thiểu
-    
-    Returns:
-        list: Danh sách các nhóm, mỗi nhóm là một list các câu
-    """
-    n = len(similarity_matrix)
-    grouped = [False] * n  # Đánh dấu câu đã được phân nhóm (mảng đánh dấu)
-    groups = []  # Danh sách các nhóm
+    return stats
+
+def semantic_spreading_grouping(sim_matrix, initial_threshold, decay_factor, min_threshold):
+    num_sentences = sim_matrix.shape[0]
+    ungrouped_indices = list(range(num_sentences))
+    groups = []
     current_threshold = initial_threshold
-    
-    print(f"\nBắt đầu phân nhóm với threshold ban đầu: {current_threshold:.4f}")
-    
-    # Lặp cho đến khi tất cả các câu được phân nhóm
-    group_count = 0
-    
-    while False in grouped:
+    group_count = 1
+
+    while len(ungrouped_indices) > 0:
+        best_pair_score = -1
+        best_pair = None
+
+        # Tìm cặp có độ tương đồng cao nhất trong các câu chưa được nhóm
+        possible_pairs = []
+        for i in range(len(ungrouped_indices)):
+            for j in range(i + 1, len(ungrouped_indices)):
+                idx1 = ungrouped_indices[i]
+                idx2 = ungrouped_indices[j]
+                score = sim_matrix[idx1, idx2]
+                if score >= current_threshold:
+                    possible_pairs.append(((idx1, idx2), score))
+
+        if not possible_pairs:
+            current_threshold = max(min_threshold, current_threshold * decay_factor)
+            if current_threshold == min_threshold and len(ungrouped_indices) > 0:
+                 for idx in ungrouped_indices:
+                     groups.append([idx])
+                 ungrouped_indices = [] # Kết thúc vòng lặp
+            continue # Thử lại với threshold mới hoặc kết thúc
+
+        # Sắp xếp các cặp tìm được theo score giảm dần
+        possible_pairs.sort(key=lambda x: x[1], reverse=True)
+        best_pair, best_pair_score = possible_pairs[0]
+
+        # Tạo nhóm mới bắt đầu từ cặp tốt nhất
+        current_group = list(best_pair)
+        ungrouped_indices.remove(best_pair[0])
+        ungrouped_indices.remove(best_pair[1])
+
+        # Mở rộng nhóm: Thêm các câu chưa nhóm có độ tương đồng đủ cao với BẤT KỲ câu nào trong nhóm hiện tại
+        added_in_iteration = True
+        while added_in_iteration:
+            added_in_iteration = False
+            indices_to_add = []
+            remaining_ungrouped = list(ungrouped_indices) # Tạo bản sao để duyệt an toàn
+
+            for ungrouped_idx in remaining_ungrouped:
+                should_add = False
+                max_sim_to_group = -1
+                for group_member_idx in current_group:
+                    similarity = sim_matrix[ungrouped_idx, group_member_idx]
+                    max_sim_to_group = max(max_sim_to_group, similarity)
+                    if similarity >= current_threshold:
+                        should_add = True
+                        break # Chỉ cần một câu trong nhóm thỏa mãn là đủ
+
+                if should_add:
+                    indices_to_add.append(ungrouped_idx)
+
+            if indices_to_add:
+                for idx_to_add in indices_to_add:
+                    if idx_to_add in ungrouped_indices: # Kiểm tra lại phòng trường hợp đã bị thêm bởi logic khác
+                        current_group.append(idx_to_add)
+                        ungrouped_indices.remove(idx_to_add)
+                        added_in_iteration = True
+
+        groups.append(sorted(current_group))
         group_count += 1
-        print(f"\nĐang tìm nhóm {group_count} với threshold: {current_threshold:.4f}")
-        
-        # 1. Tìm và sắp xếp tất cả các cặp câu theo relationship giảm dần
-        all_pairs = []
-        for i in range(n):
-            if not grouped[i]:  # Chỉ xét các câu chưa được phân nhóm
-                for j in range(i+1, n):
-                    if not grouped[j]:  # Chỉ xét các câu chưa được phân nhóm
-                        sim = similarity_matrix[i][j]
-                        if sim >= current_threshold:
-                            all_pairs.append((i, j, sim))
-        
-        # Sắp xếp các cặp theo relationship giảm dần
-        all_pairs.sort(key=lambda x: x[2], reverse=True)
-        
-        # Hiển thị thông tin về các cặp câu vượt threshold
-        if all_pairs:
-            print(f"  Tìm thấy {len(all_pairs)} cặp câu có relationship >= {current_threshold:.4f}")
-            if len(all_pairs) > 0:
-                i, j, sim = all_pairs[0]  # Cặp có relationship cao nhất
-                print(f"  Cặp tốt nhất: Câu {i} và câu {j}: {sim:.4f}")
-        else:
-            print(f"  Không tìm thấy cặp câu nào có relationship >= {current_threshold:.4f}")
-            
-            # Nếu không tìm thấy cặp nào vượt threshold hiện tại, giảm threshold ngay lập tức
-            new_threshold = current_threshold * decay_factor
-            if new_threshold < min_threshold:
-                # Nếu giảm threshold quá thấp, thêm mỗi câu chưa nhóm vào một nhóm riêng
-                for i in range(n):
-                    if not grouped[i]:
-                        groups.append([i])
-                        grouped[i] = True
-                print(f"  threshold giảm xuống {new_threshold:.4f} < {min_threshold:.4f} (tối thiểu), mỗi câu còn lại là một nhóm")
-                break
-            else:
-                current_threshold = new_threshold
-                print(f"  Giảm threshold xuống {current_threshold:.4f} và thử lại")
-                continue
-        
-        # 2. Chọn cặp tốt nhất làm anchor cho nhóm mới
-        if all_pairs:
-            i, j, _ = all_pairs[0]  # Lấy cặp có relationship cao nhất
-            current_group = [i, j]
-            grouped[i] = grouped[j] = True
-            
-            # 3. Mở rộng nhóm bằng cách lan truyền
-            to_check = current_group.copy()
-            
-            while to_check:
-                current = to_check.pop(0)
-                
-                # So sánh câu hiện tại với các câu chưa được phân nhóm
-                for k in range(n):
-                    if not grouped[k] and similarity_matrix[current][k] >= current_threshold:
-                        current_group.append(k)
-                        grouped[k] = True
-                        to_check.append(k)
-            
-            # 4. Thêm nhóm vào danh sách các nhóm
-            current_group.sort()
-            groups.append(current_group)
-            print(f"  Đã tạo nhóm {len(groups)} với {len(current_group)} câu: {current_group}")
-            
-            # 5. Giảm threshold cho nhóm tiếp theo
-            current_threshold *= decay_factor
-            if current_threshold < min_threshold:
-                current_threshold = min_threshold
-            print(f"  Giảm threshold xuống {current_threshold:.4f} cho nhóm tiếp theo")
-            
-        else:
-            # Trường hợp không tìm thấy cặp nào, nhưng vẫn còn câu chưa được phân nhóm
-            # (Chỉ xảy ra khi threshold đã giảm tới min_threshold)
-            # Thêm câu đầu tiên chưa được phân nhóm vào một nhóm mới
-            anchor = grouped.index(False)
-            groups.append([anchor])
-            grouped[anchor] = True
-            print(f"  Tạo nhóm đơn lẻ cho câu {anchor}")
-    
-    # Hiển thị thống kê về các nhóm
-    print(f"\nĐã phân thành {len(groups)} nhóm :")
-    for i, group in enumerate(groups):
-        print(f"  Nhóm {i+1}: {len(group)} câu - {group}")
-    
+
+        # Giảm threshold cho nhóm tiếp theo, nhưng không thấp hơn min_threshold
+        current_threshold = max(min_threshold, initial_threshold * (decay_factor ** (group_count -1))) # Hoặc logic giảm khác
+
     return groups
 
 def visualize_similarity_matrix(matrix, groups=None, title="Semantic Similarity Matrix"):
@@ -693,75 +670,105 @@ def export_results_to_file(document, sentences, groups, sentence_triples=None, d
     except Exception as e:
         print(f"Lỗi khi xuất kết quả ra file: {e}")
 
-if __name__ == "__main__":
-    print("1. Xử lý passages từ tập dữ liệu")
-    print("2. Phân tích tài liệu tự nhập")
-    print("3. Phân tích tài liệu từ file")
-    
-    choice = input("\nLựa chọn của bạn (1/2/3): ")
-    
-    if choice == '1':
-        # Đọc dataset
-        doc = pd.read_csv('passages_1000.csv')
-        passages = doc['passage_text'].tolist()
-        
-        # Lấy số lượng passages cần xử lý từ người dùng
-        while True:
-            try:
-                num_passages = int(input("Nhập số passages cần xử lý (1-1000): "))
-                if 1 <= num_passages <= 1000:
-                    break
-                else:
-                    print("Số lượng phải nằm trong khoảng từ 1 đến 1000.")
-            except ValueError:
-                print("Vui lòng nhập một số nguyên.")
-        
-        # Giới hạn số lượng passages
-        passages_to_process = passages[:min(num_passages, len(passages))]
-        
-        for i, passage in enumerate(passages_to_process):
-            process_document(passage, f"Passage {i+1}", query=f"Query for passage {i+1}")
-    
-    elif choice == '2':
-        # Nhập tài liệu trực tiếp
-        print("\n=== NHẬP TÀI LIỆU TRỰC TIẾP ===")
-        print("Nhập nội dung tài liệu (kết thúc bằng một dòng chỉ có '###'):")
-        lines = []
-        while True:
-            line = input()
-            if line == '###':
-                break
-            lines.append(line)
-        
-        if not lines:
-            print("Không có nội dung được nhập, hủy phân tích.")
-            exit()
-        
-        document = "\n".join(lines)
-        query = input("Nhập query hoặc chủ đề tài liệu (có thể để trống): ")
-        
-        # Xử lý tài liệu nhập trực tiếp
-        process_document(document, "Tài_liệu_thủ_công", query=query, save_to_db=False)
-    
-    elif choice == '3':
-        # Tải tài liệu từ file
-        file_path = input("\nNhập đường dẫn đến file tài liệu: ")
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                document = file.read()
-            print(f"Đã tải thành công tài liệu từ {file_path}")
-            
-            # Lấy tên file làm document_id
-            import os
-            document_id = os.path.splitext(os.path.basename(file_path))[0]
-            
-            query = input("Nhập query hoặc chủ đề tài liệu (có thể để trống): ")
-            
-            # Xử lý tài liệu từ file
-            process_document(document, document_id, query=query, save_to_db=False)
-            
-        except Exception as e:
-            print(f"Lỗi khi đọc file: {e}")
-    
-    else:
-        print("Lựa chọn không hợp lệ.")
+# --- ADD THE NEW CHUNKING FUNCTION ---
+def semantic_chunk_passage_from_grouping_logic(
+    doc_id: str,
+    passage_text: str,
+    model_name: str = "thenlper/gte-large",
+    initial_threshold: Union[float, str] = 'auto',
+    decay_factor: float = 0.85,
+    min_threshold: Union[float, str] = 'auto',
+    auto_percentiles: Tuple[int, int] = (85, 25),
+    **kwargs # Catch unused args
+) -> List[Tuple[str, str]]:
+    """
+    Chunks a passage using the Semantic Grouping logic (spreading grouping).
+    Returns a list of (chunk_id, chunk_text).
+    """
+    chunks_result = []
+    try:
+        # a. Split sentences
+        sentences = extract_and_simplify_sentences(passage_text, simplify=False)
+        if not sentences: return []
+        if len(sentences) == 1: # Handle single sentence passage
+            chunk_text = sentences[0]
+            chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:10]
+            chunk_id = f"{doc_id}_{chunk_hash}"
+            return [(chunk_id, chunk_text)]
+
+        # b. Embed sentences
+        sentence_vectors = embed_text_list(sentences, model_name=model_name)
+        if sentence_vectors is None: return []
+
+        # c. Create similarity matrix
+        sim_matrix = create_semantic_matrix(sentence_vectors)
+
+        # d. Determine thresholds (if 'auto')
+        current_initial_threshold = initial_threshold
+        current_min_threshold = min_threshold
+
+        if initial_threshold == 'auto' or min_threshold == 'auto':
+            percentiles = analyze_similarity_distribution(sim_matrix) # Don't pass sentences here
+            if not percentiles:
+                 current_initial_threshold = 0.8 # Default fallback
+                 current_min_threshold = 0.2   # Default fallback
+                 print("  WARNING: Could not analyze distribution, using default thresholds (0.8, 0.2)")
+            else:
+                try:
+                    initial_p, min_p = auto_percentiles
+                    initial_key, min_key = f'p{initial_p}', f'p{min_p}'
+
+                    if initial_threshold == 'auto':
+                        current_initial_threshold = percentiles.get(initial_key, 0.8)
+                    elif isinstance(initial_threshold, str): current_initial_threshold = float(initial_threshold)
+
+                    if min_threshold == 'auto':
+                        current_min_threshold = percentiles.get(min_key, 0.2)
+                    elif isinstance(min_threshold, str): current_min_threshold = float(min_threshold)
+
+                    # Ensure min < initial, adjust if necessary
+                    if current_min_threshold >= current_initial_threshold:
+                        print(f"  WARNING: Auto min threshold ({current_min_threshold:.4f}) >= initial ({current_initial_threshold:.4f}). Adjusting min.")
+                        # Try a lower percentile or a fraction of initial
+                        lower_min_key = f'p{max(10, min_p - 15)}'
+                        if lower_min_key in percentiles:
+                            current_min_threshold = percentiles[lower_min_key]
+                        else:
+                            current_min_threshold = current_initial_threshold * 0.5
+                        current_min_threshold = max(0.1, current_min_threshold) # Ensure not too low
+                        print(f"  Adjusted min threshold: {current_min_threshold:.4f}")
+
+                except Exception as auto_err:
+                    print(f"  ERROR determining auto thresholds: {auto_err}. Using defaults (0.8, 0.2).")
+                    current_initial_threshold = 0.8 if initial_threshold == 'auto' else float(initial_threshold)
+                    current_min_threshold = 0.2 if min_threshold == 'auto' else float(min_threshold)
+        # Ensure thresholds are float if provided as strings initially
+        elif isinstance(initial_threshold, str): current_initial_threshold = float(initial_threshold)
+        elif isinstance(min_threshold, str): current_min_threshold = float(min_threshold)
+
+        # Final check min < initial
+        if current_min_threshold >= current_initial_threshold:
+             print(f"  WARNING: Final check failed: min ({current_min_threshold:.4f}) >= initial ({current_initial_threshold:.4f}). Setting min = initial * 0.5")
+             current_min_threshold = max(0.1, current_initial_threshold * 0.5)
+
+        # e. Perform semantic grouping
+        groups = semantic_spreading_grouping(
+            sim_matrix,
+            current_initial_threshold,
+            decay_factor,
+            current_min_threshold
+        )
+
+        # f. Create chunks from groups
+        for group_idx, group in enumerate(groups):
+            chunk_sentences = [sentences[sent_idx] for sent_idx in group]
+            chunk_text = " ".join(chunk_sentences).strip()
+            if chunk_text:
+                chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:10]
+                chunk_id = f"{doc_id}_{chunk_hash}_{group_idx}" # Add group_idx for uniqueness
+                chunks_result.append((chunk_id, chunk_text))
+
+    except Exception as e:
+        print(f"Error chunking doc {doc_id} with Semantic Grouping: {e}")
+    return chunks_result
+

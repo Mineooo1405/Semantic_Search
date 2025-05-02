@@ -41,14 +41,14 @@ def save_to_csv(passages, output_file):
 
 if __name__ == "__main__":
     input_file = "d:/SemanticSearch/ms_marco_1000.csv"
-    output_file = "d:/SemanticSearch/passages_1000.csv"
 
-    passages = extract_passage_texts(input_file, limit=1000)
+    passages = extract_passage_texts(input_file, limit=10)
 
     print(f"\nĐã trích xuất {len(passages)} đoạn văn")
     for i in range(min(3, len(passages))):
         print(f"\nĐoạn {i+1}:")
         print(f"ID: {passages[i]['id']}")
         print(f"Passage: {passages[i]['passage_text'][:150]}...")
-
+        
+    output_file = f"d:/SemanticSearch/passages_{len(passages)}.csv"
     save_to_csv(passages, output_file)

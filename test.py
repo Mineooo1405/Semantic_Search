@@ -1,7 +1,9 @@
-from Tool.Enhanced_Sentence_Detector import detect_sentences
+from Semantic_Grouping import process_and_store_grouped_chunks
+import pandas as pd
 
-text = "'We're not ever going to feed the whole city this way,' cautions Hardy. 'But if enough unused space can be developed like this, there's no reason why you shouldn't eventually target maybe between 5% and 10% of consumption.'"
 
-sentences = detect_sentences(text)
-for s in sentences:
-    print(s)
+passages = pd.read_csv("d:/SemanticSearch/passages_10.csv")
+passages = passages['passage_text'].tolist()
+print(f"Đã trích xuất {len(passages)} đoạn văn")
+
+process_and_store_grouped_chunks(passages, 0.6, 0.7, 0.1,"thenlper/gte-large",True)
