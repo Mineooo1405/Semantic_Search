@@ -1,13 +1,67 @@
 # .gitignore
-myenv/
-*.dll
-*.lib
-*.exe
+
+# Ignore Python virtual environments
+env*/
+venv*/
+ENV*/
+.myenv/
+*.env
+
+# Ignore model checkpoints, weights, and serialized models
+*.h5
 *.pt
+*.pth
+*.ckpt
 *.pkl
-*.log
-__pycache__/
+*.dill
+*.joblib
+*.pb
+*.onnx
+*.tflite
+*.weights
+*.params
+*.npz
+
+# Ignore dataset and data folders
 Data/
+data/
+datasets/
+dataset/
+TrainingData*/
+training_data*/
+*.tsv
+*.csv
+*.jsonl
+*.json
+
+# Ignore embedding/model folders
 EmbeddingModel/
+embedding/
+embeddings/
+TrainedModels/
+trained_models/
+models/
+model/
+
+# Ignore logs and outputs
+*.log
+*.out
+*.err
+
+# Ignore cache and Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore NLTK and other NLP data
 nltk_data/
-.env
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore VSCode settings
+.vscode/

@@ -10,7 +10,8 @@ from beir import util
 from beir.datasets.data_loader import GenericDataLoader
 import numpy as np
 from typing import List, Tuple, Dict, Callable, Optional, Union
-# import argparse # REMOVE argparse
+import concurrent.futures
+import functools
 
 try:
     from Semantic_Grouping import semantic_chunk_passage_from_grouping_logic
@@ -109,7 +110,7 @@ def get_common_params() -> Dict:
     print("\n--- Common Configuration ---")
     params = {}
     params['dataset_name'] = get_input("BEIR Dataset Name", default="msmarco", required=True)
-    params['data_dir'] = get_input("Directory for BEIR data", default="./Data", required=True)
+    params['data_dir'] = get_input("Directory for BEIR data", default="./Data/msmarco", required=True)
     params['output_dir'] = get_input("Base Output Directory", default="D:/SemanticSearch/TrainingData_MatchZoo_BEIR", required=True)
     params['embedding_model'] = get_input("Embedding Model Name (for semantic methods)", default="thenlper/gte-large", required=True)
     max_triplets = get_int_input("Max Triplets (0 for unlimited)", default=100000, required=True, min_val=0)
@@ -161,61 +162,35 @@ def get_text_splitter_params() -> Dict:
     params['chunk_overlap'] = get_int_input("Chunk Overlap (characters)", default=200, required=True, min_val=0)
     return params
 
-# --- Get Configuration from User ---
-common_config = get_common_params()
-selected_method = select_chunking_method()
-method_params = {}
-if selected_method == 'semantic_grouping':
-    method_params = get_semantic_grouping_params(common_config['embedding_model'])
-elif selected_method == 'semantic_splitter':
-    method_params = get_semantic_splitter_params(common_config['embedding_model'])
-elif selected_method == 'text_splitter':
-    method_params = get_text_splitter_params()
-    method_params['model_name'] = common_config['embedding_model'] # Add model_name for consistency
+def get_split_type() -> str:
+    """Prompts the user to select the data split type (train or test)."""
+    print("\n--- Select Data Split ---")
+    while True:
+        response = input("Process data for 'train' or 'test'? ").strip().lower()
+        if response in ['train', 'test']:
+            return response
+        else:
+            print("Invalid input. Please enter 'train' or 'test'.")
 
-# --- Combine Configurations ---
-DATASET_NAME = common_config['dataset_name']
-LOCAL_DATA_PATH = os.path.join(common_config['data_dir'], DATASET_NAME)
-METHOD_SUFFIX = selected_method.replace('_', '-')
-OUTPUT_DIR_METHOD = os.path.join(common_config['output_dir'], f"{DATASET_NAME}_{METHOD_SUFFIX}")
-CHUNKS_OUTPUT_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{DATASET_NAME}_{METHOD_SUFFIX}_chunks.jsonl")
-CHUNK_DOC_MAP_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{DATASET_NAME}_{METHOD_SUFFIX}_chunk_doc_map.json")
-DOC_CHUNK_MAP_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{DATASET_NAME}_{METHOD_SUFFIX}_doc_chunk_map.json")
-TRAIN_TRIPLETS_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{DATASET_NAME}_{METHOD_SUFFIX}_train_triplets.tsv")
-EMBEDDING_MODEL_NAME = common_config['embedding_model']
-MAX_TRIPLETS_TO_GENERATE = common_config['max_triplets']
-MAX_DOCS_TO_PROCESS = common_config['max_docs']
+# --- Worker Function for Parallel Chunking ---
+def chunk_document_worker(doc_item: Tuple[str, Dict], chunking_func: Callable, params: Dict) -> Tuple[str, List[Tuple[str, str]]]:
+    doc_id, doc_data = doc_item
+    try:
+        print(f"Processing document: {doc_id}")  # Thêm log
+        passage_text = doc_data.get("text", "")
+        title = doc_data.get("title", "")
+        full_text_to_chunk = f"{title}. {passage_text}" if title else passage_text
 
-# --- Map chunking method name to function ---
-chunking_functions: Dict[str, Callable] = {
-    'semantic_grouping': semantic_chunk_passage_from_grouping_logic,
-    'semantic_splitter': chunk_passage_semantic_splitter,
-    'text_splitter': chunk_passage_text_splitter,
-}
-selected_chunking_func = chunking_functions.get(selected_method)
-if selected_chunking_func is None or not callable(selected_chunking_func):
-    print(f"Error: Chunking function for '{selected_method}' not available/callable.")
-    exit()
+        if not full_text_to_chunk:
+            print(f"Document {doc_id} is empty.")  # Thêm log
+            return doc_id, []
 
-# --- Print Final Configuration ---
-print(f"\n--- Final Configuration ---")
-print(f"Dataset: {DATASET_NAME}")
-print(f"BEIR Data Path: {LOCAL_DATA_PATH}")
-print(f"Output Directory: {OUTPUT_DIR_METHOD}")
-print(f"Chunking Method: {selected_method}")
-print(f"Embedding Model: {EMBEDDING_MODEL_NAME}")
-print(f"Max Triplets: {MAX_TRIPLETS_TO_GENERATE if MAX_TRIPLETS_TO_GENERATE else 'Unlimited'}")
-print(f"Max Documents to Process: {MAX_DOCS_TO_PROCESS if MAX_DOCS_TO_PROCESS else 'All'}")
-print(f"Chunking Parameters: {method_params}")
-print(f"---------------------------\n")
-
-# --- Download NLTK data ---
-
-try:
-    nltk.data.find('tokenizers/punkt')
-except nltk.downloader.DownloadError:
-    print("Downloading NLTK 'punkt' tokenizer...")
-    nltk.download('punkt', quiet=True)
+        doc_chunks = chunking_func(doc_id, full_text_to_chunk, **params)
+        print(f"Document {doc_id} processed successfully.")  # Thêm log
+        return doc_id, doc_chunks if doc_chunks else []
+    except Exception as e:
+        print(f"Error processing document {doc_id}: {e}")  # Thêm log
+        return doc_id, []
 
 # --- Helper Functions ---
 def clean_text(text):
@@ -224,183 +199,400 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-# --- Main Processing ---
-os.makedirs(OUTPUT_DIR_METHOD, exist_ok=True)
-os.makedirs(LOCAL_DATA_PATH, exist_ok=True)
+def find_next_run_dir(base_output_dir: str, split_prefix: str) -> str:
+    """
+    Finds the next available directory name like 'train_1', 'train_2', etc.
+    within the base_output_dir.
+    """
+    os.makedirs(base_output_dir, exist_ok=True) # Ensure base directory exists
+    counter = 1
+    while True:
+        run_dir = os.path.join(base_output_dir, f"{split_prefix}_{counter}")
+        if not os.path.exists(run_dir):
+            print(f"Next available run directory: {run_dir}")
+            return run_dir
+        counter += 1
 
-# == Step 1: Load BEIR Data ==
-print(f"\nLoading BEIR dataset: {DATASET_NAME} from {LOCAL_DATA_PATH}...")
-data_folder_to_load = LOCAL_DATA_PATH
-try:
-    corpus, queries, qrels = GenericDataLoader(data_folder=data_folder_to_load).load(split="train")
-    print(f"Loaded {len(corpus)} documents, {len(queries)} queries, and qrels for {len(qrels)} queries from {data_folder_to_load}.")
-except Exception as e:
-    print(f"Error loading BEIR dataset '{DATASET_NAME}' from {data_folder_to_load}: {e}")
-    print(f"Attempting to download using 'util.download_and_unzip'...")
-    try:
-        url = f"https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{DATASET_NAME}.zip"
-        download_target_dir = os.path.dirname(LOCAL_DATA_PATH)
-        if not download_target_dir: download_target_dir = "."
-        util.download_and_unzip(url, download_target_dir)
-        print(f"Dataset downloaded and unzipped potentially into: {LOCAL_DATA_PATH}")
-        potential_subfolder_path = os.path.join(LOCAL_DATA_PATH, DATASET_NAME)
-        if os.path.exists(os.path.join(potential_subfolder_path, "corpus.jsonl")):
-            print(f"Adjusting load path to subfolder: {potential_subfolder_path}")
-            data_folder_to_load = potential_subfolder_path
-        corpus, queries, qrels = GenericDataLoader(data_folder=data_folder_to_load).load(split="train")
-        print(f"Successfully loaded {len(corpus)} documents, {len(queries)} queries, and qrels for {len(qrels)} queries from {data_folder_to_load}.")
-    except Exception as download_err:
-        print(f"Failed to download or load the dataset after download attempt: {download_err}")
-        print(f"Please manually check the directory structure in '{common_config['data_dir']}' and ensure '{DATASET_NAME}' contains corpus.jsonl, queries.jsonl, and qrels/train.tsv.")
+# --- ĐẶT TOÀN BỘ LOGIC CHÍNH VÀO ĐÂY ---
+if __name__ == "__main__":
+
+    # --- Get Configuration from User ---
+    common_config = get_common_params()
+    selected_method = select_chunking_method()
+    split_type = get_split_type() # <<< Giữ nguyên việc lấy split_type
+
+    method_params = {}
+    if selected_method == 'semantic_grouping':
+        method_params = get_semantic_grouping_params(common_config['embedding_model'])
+    elif selected_method == 'semantic_splitter':
+        method_params = get_semantic_splitter_params(common_config['embedding_model'])
+    elif selected_method == 'text_splitter':
+        method_params = get_text_splitter_params()
+        method_params['model_name'] = common_config['embedding_model'] # Add model_name for consistency
+
+    # --- Combine Configurations ---
+    DATASET_NAME = common_config['dataset_name']
+    # <<< SỬA ĐỔI: Xác định thư mục cơ sở cho phương thức >>>
+    BASE_METHOD_DIR = os.path.join(common_config['output_dir'], f"{DATASET_NAME}_{selected_method.replace('_', '-')}")
+
+    # <<< SỬA ĐỔI: Tìm thư mục chạy tiếp theo và đặt OUTPUT_DIR_METHOD >>>
+    OUTPUT_DIR_METHOD = find_next_run_dir(BASE_METHOD_DIR, split_type)
+
+    # Các đường dẫn file output sẽ tự động nằm trong thư mục con có đánh số
+    # <<< SỬA ĐỔI: Đảm bảo tên file không lặp lại split_type >>>
+    METHOD_AND_SPLIT_PREFIX = f"{DATASET_NAME}_{selected_method.replace('_', '-')}_{split_type}" # Ví dụ: msmarco_semantic-grouping_test
+    CHUNKS_OUTPUT_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_chunks.jsonl")
+    CHUNK_DOC_MAP_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_chunk_doc_map.json")
+    DOC_CHUNK_MAP_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_doc_chunk_map.json")
+    OUTPUT_TRIPLETS_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_triplets.tsv")
+
+    EMBEDDING_MODEL_NAME = common_config['embedding_model']
+    MAX_TRIPLETS_TO_GENERATE = common_config['max_triplets']
+    MAX_DOCS_TO_PROCESS = common_config['max_docs']
+
+    # --- Map chunking method name to function ---
+    chunking_functions: Dict[str, Callable] = {
+        'semantic_grouping': semantic_chunk_passage_from_grouping_logic,
+        'semantic_splitter': chunk_passage_semantic_splitter,
+        'text_splitter': chunk_passage_text_splitter,
+    }
+    selected_chunking_func = chunking_functions.get(selected_method)
+    if selected_chunking_func is None or not callable(selected_chunking_func):
+        print(f"Error: Chunking function for '{selected_method}' not available/callable.")
         exit()
 
+    # --- Print Final Configuration ---
+    print(f"\n--- Final Configuration ---")
+    print(f"Dataset: {DATASET_NAME}")
+    print(f"Processing Split: {split_type}")
+    # <<< SỬA ĐỔI: LOCAL_DATA_PATH có thể cần điều chỉnh nếu bạn muốn nó tách biệt theo dataset >>>
+    # Hiện tại nó đang trỏ đến ./Data/msmarco/msmarco dựa trên default input
+    # Nếu bạn muốn nó chỉ là ./Data/msmarco, hãy sửa default trong get_common_params
+    LOCAL_DATA_PATH = common_config['data_dir'] # Sử dụng trực tiếp data_dir đã nhập
+    print(f"BEIR Data Path: {LOCAL_DATA_PATH}")
+    print(f"Output Directory: {OUTPUT_DIR_METHOD}") # Đường dẫn này giờ đã bao gồm split và số thứ tự
+    print(f"Chunking Method: {selected_method}")
+    print(f"Embedding Model: {EMBEDDING_MODEL_NAME}")
+    print(f"Max Triplets: {MAX_TRIPLETS_TO_GENERATE if MAX_TRIPLETS_TO_GENERATE else 'Unlimited'}")
+    print(f"Max Documents to Process: {MAX_DOCS_TO_PROCESS if MAX_DOCS_TO_PROCESS else 'All'}")
+    print(f"Chunking Parameters: {method_params}")
+    print(f"---------------------------\n")
 
-# == Step 2: Chunk Passages ==
-if not os.path.exists(CHUNKS_OUTPUT_PATH) or not os.path.exists(DOC_CHUNK_MAP_PATH):
-    print(f"\nStarting Step 2: Chunking documents using '{selected_method}' method...")
-    if MAX_DOCS_TO_PROCESS:
-        print(f"Processing a maximum of {MAX_DOCS_TO_PROCESS} documents.")
-    chunk_to_doc_map = {}
-    doc_to_chunk_map = {}
-    processed_docs = 0
-    docs_processed_count = 0
+    # --- Download NLTK data ---
+    try:
+        nltk.data.find('tokenizers/punkt')
+        print("NLTK 'punkt' resource found.") # Optional confirmation
+    except LookupError:
+        print("Downloading NLTK 'punkt' tokenizer...")
+        nltk.download('punkt', quiet=True)
+
+    # <<< THÊM KHỐI NÀY ĐỂ TẢI punkt_tab >>>
+    try:
+        nltk.data.find('tokenizers/punkt_tab')
+        print("NLTK 'punkt_tab' resource found.") # Optional confirmation
+    except LookupError:
+        print("Downloading NLTK 'punkt_tab' resource...")
+        nltk.download('punkt_tab', quiet=True)
+    # <<< KẾT THÚC KHỐI THÊM >>>
+
+    # --- Main Processing ---
+    # <<< SỬA ĐỔI: Tạo thư mục output cuối cùng (đã bao gồm số thứ tự) >>>
+    os.makedirs(OUTPUT_DIR_METHOD, exist_ok=True)
+    # <<< SỬA ĐỔI: Đảm bảo thư mục dữ liệu BEIR gốc tồn tại (nơi chứa thư mục con dataset) >>>
+    # Ví dụ: Nếu data_dir là './Data/msmarco/msmarco', thì thư mục gốc là './Data/msmarco'
+    beir_base_data_dir = os.path.dirname(common_config['data_dir'])
+    os.makedirs(beir_base_data_dir, exist_ok=True)
+
+    # == Step 1: Load BEIR Data ==
+    # <<< SỬA ĐỔI: dataset_specific_path là đường dẫn người dùng nhập >>>
+    dataset_specific_path = common_config['data_dir'] # Ví dụ: './Data/msmarco/msmarco'
+    print(f"\nLoading BEIR dataset: {DATASET_NAME} (split: {split_type}) from {dataset_specific_path}...")
 
     try:
-        corpus_iterable = corpus.items()
-        if MAX_DOCS_TO_PROCESS:
-            corpus_iterable = list(corpus.items())[:MAX_DOCS_TO_PROCESS]
-            tqdm_total = MAX_DOCS_TO_PROCESS
-        else:
-            tqdm_total = len(corpus)
-
-        with open(CHUNKS_OUTPUT_PATH, 'w', encoding='utf-8') as f_chunks_out:
-            for doc_id, doc_data in tqdm(corpus_iterable, desc=f"Chunking Corpus ({selected_method})", total=tqdm_total):
-                passage_text = doc_data.get("text", "")
-                title = doc_data.get("title", "")
-                full_text_to_chunk = f"{title}. {passage_text}" if title else passage_text
-                if not full_text_to_chunk: continue
-
-                # --- MODIFIED CALL TO CHUNKING FUNCTION ---
-                # Pass all method_params using **kwargs
-                # The chunking function will pick the ones it needs
-                doc_chunks = selected_chunking_func(
-                    doc_id,
-                    full_text_to_chunk,
-                    **method_params # Pass the whole dictionary
-                )
-
-                if doc_chunks:
-                    doc_to_chunk_map[doc_id] = []
-                    for chunk_id, chunk_text in doc_chunks:
-                        chunk_to_doc_map[chunk_id] = doc_id
-                        doc_to_chunk_map[doc_id].append(chunk_id)
-                        f_chunks_out.write(json.dumps({'chunk_id': chunk_id, 'text': chunk_text}) + '\n')
-                processed_docs += 1
-                docs_processed_count += 1
-
+        # <<< SỬA ĐỔI: Sử dụng dataset_specific_path và bỏ prefix >>>
+        corpus, queries, qrels = GenericDataLoader(data_folder=dataset_specific_path).load(split=split_type)
+        print(f"Loaded {len(corpus)} documents, {len(queries)} queries, and qrels for {len(qrels)} queries for split '{split_type}' from {dataset_specific_path}.")
     except Exception as e:
-        print(f"\nAn error occurred during chunking: {e}") # Add newline for clarity
+        # <<< SỬA ĐỔI: Thông báo lỗi bao gồm đường dẫn đúng >>>
+        print(f"Error loading BEIR dataset '{DATASET_NAME}' (split: {split_type}) from {dataset_specific_path}: {e}")
+        # <<< SỬA ĐỔI: Tải vào thư mục cha của dataset_specific_path >>>
+        download_target_dir = os.path.dirname(dataset_specific_path) # Ví dụ: './Data/msmarco'
+        print(f"Attempting to download using 'util.download_and_unzip' into '{download_target_dir}'...")
+        try:
+            url = f"https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{DATASET_NAME}.zip"
+            # Tải vào thư mục cha, download_path sẽ là thư mục con được giải nén (dataset_specific_path)
+            download_path = util.download_and_unzip(url, download_target_dir)
+            print(f"Dataset downloaded and unzipped to: {download_path}") # download_path nên là dataset_specific_path
+
+            # <<< SỬA ĐỔI: Sử dụng download_path (chính là dataset_specific_path) và bỏ prefix >>>
+            corpus, queries, qrels = GenericDataLoader(data_folder=download_path).load(split=split_type)
+            print(f"Successfully loaded {len(corpus)} documents, {len(queries)} queries, and qrels for {len(qrels)} queries for split '{split_type}' from {download_path}.")
+        except Exception as download_err:
+            print(f"Failed to download or load the dataset after download attempt: {download_err}")
+            # <<< SỬA ĐỔI: Thông báo lỗi bao gồm đường dẫn đúng >>>
+            print(f"Please manually check the directory structure. Ensure '{dataset_specific_path}' contains corpus.jsonl, queries.jsonl, and qrels/{split_type}.tsv.")
+            exit()
+
+    # --- THÊM: Xác định các tài liệu liên quan từ qrels ---
+    print("Identifying relevant documents from qrels...")
+    relevant_doc_ids = set()
+    for qid, doc_scores in qrels.items():
+        for doc_id, score in doc_scores.items():
+            if score > 0:
+                relevant_doc_ids.add(doc_id)
+    print(f"Found {len(relevant_doc_ids)} unique relevant documents in qrels.")
+    # ----------------------------------------------------
+
+    # == Step 2: Chunk Passages ==
+    chunking_needed = not os.path.exists(CHUNKS_OUTPUT_PATH) or \
+                      not os.path.exists(DOC_CHUNK_MAP_PATH) or \
+                      not os.path.exists(CHUNK_DOC_MAP_PATH)
+
+    if chunking_needed:
+        print(f"\nStarting Step 2: Chunking documents using '{selected_method}' method (Parallel)...")
+
+        # --- CẤU HÌNH XỬ LÝ SONG SONG ---
+        NUM_WORKERS = 2 # **ĐIỀU CHỈNH CẨN THẬN DỰA TRÊN RAM!**
+        print(f"Using {NUM_WORKERS} worker processes.")
+        # ---------------------------------
+
+        chunk_to_doc_map = {}
+        doc_to_chunk_map = {}
+        processed_docs_count = 0
+        total_chunks_created = 0
+
+        # --- SỬA ĐỔI: Tạo corpus_to_process ưu tiên tài liệu liên quan ---
+        if MAX_DOCS_TO_PROCESS:
+            print(f"Prioritizing relevant documents for processing (limit: {MAX_DOCS_TO_PROCESS})...")
+            corpus_to_process = {}
+            relevant_docs_in_corpus = {doc_id: data for doc_id, data in corpus.items() if doc_id in relevant_doc_ids}
+            print(f"Found {len(relevant_docs_in_corpus)} relevant documents present in the loaded corpus.")
+
+            # Lấy các tài liệu liên quan trước, tối đa MAX_DOCS_TO_PROCESS
+            relevant_items = list(relevant_docs_in_corpus.items())
+            num_relevant_to_take = min(len(relevant_items), MAX_DOCS_TO_PROCESS)
+            for i in range(num_relevant_to_take):
+                doc_id, data = relevant_items[i]
+                corpus_to_process[doc_id] = data
+
+            # Nếu chưa đủ MAX_DOCS_TO_PROCESS, bổ sung bằng các tài liệu khác
+            remaining_needed = MAX_DOCS_TO_PROCESS - len(corpus_to_process)
+            if remaining_needed > 0:
+                print(f"Adding {remaining_needed} more non-prioritized documents to reach the limit...")
+                added_count = 0
+                for doc_id, data in corpus.items():
+                    if doc_id not in corpus_to_process: # Chỉ thêm nếu chưa có
+                        corpus_to_process[doc_id] = data
+                        added_count += 1
+                        if added_count >= remaining_needed:
+                            break
+            print(f"Final corpus_to_process size: {len(corpus_to_process)}")
+
+        else: # Nếu không giới hạn, xử lý tất cả
+            print("Processing all documents in the corpus.")
+            corpus_to_process = corpus
+        # ----------------------------------------------------------------
+
+        corpus_items = list(corpus_to_process.items())
+        total_docs_to_process = len(corpus_items)
+
+        if total_docs_to_process == 0:
+            print("Warning: No documents selected for processing. Exiting Step 2.")
+        else:
+            # Chuẩn bị sẵn các tham số cố định cho worker
+            worker_func_partial = functools.partial(
+                chunk_document_worker,
+                chunking_func=selected_chunking_func,
+                params=method_params
+            )
+
+            print(f"Starting parallel chunking of {total_docs_to_process} documents...")
+            try:
+                # Mở file chunks output trước
+                with open(CHUNKS_OUTPUT_PATH, 'w', encoding='utf-8') as f_chunks_out, \
+                     concurrent.futures.ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+
+                    # Sử dụng executor.map
+                    results = list(tqdm(executor.map(worker_func_partial, corpus_items),
+                                        total=total_docs_to_process,
+                                        desc=f"Chunking Corpus ({selected_method})"))
+
+                    # Xử lý kết quả
+                    print("\nProcessing results from workers...")
+                    for doc_id, doc_chunks in tqdm(results, desc="Aggregating results"):
+                        if doc_chunks:
+                            doc_to_chunk_map[doc_id] = []
+                            for chunk_id, chunk_text in doc_chunks:
+                                chunk_to_doc_map[chunk_id] = doc_id # Sửa lỗi gõ: chunk_to_doc_map
+                                doc_to_chunk_map[doc_id].append(chunk_id)
+                                f_chunks_out.write(json.dumps({'chunk_id': chunk_id, 'text': chunk_text}) + '\n')
+                                total_chunks_created += 1
+                        processed_docs_count += 1
+
+            except Exception as e:
+                print(f"\nAn error occurred during parallel chunking: {e}")
+                import traceback
+                traceback.print_exc()
+                exit()
+
+            print(f"\nFinished parallel chunking.")
+            print(f"Documents processed (attempted): {processed_docs_count}")
+            print(f"Total chunks created: {total_chunks_created}")
+            print(f"Chunks saved to: {CHUNKS_OUTPUT_PATH}")
+
+            print("Saving mapping files...")
+            try:
+                with open(CHUNK_DOC_MAP_PATH, 'w', encoding='utf-8') as f: json.dump(chunk_to_doc_map, f)
+                print(f"Chunk -> Doc map saved to: {CHUNK_DOC_MAP_PATH}")
+                with open(DOC_CHUNK_MAP_PATH, 'w', encoding='utf-8') as f: json.dump(doc_to_chunk_map, f)
+                print(f"Doc -> Chunk map saved to: {DOC_CHUNK_MAP_PATH}")
+            except Exception as e: print(f"Error saving mapping files: {e}")
+
+    else:
+        print(f"Chunk files for method '{selected_method}' already exist. Skipping Step 2.")
+        print(f"Loading existing Doc -> Chunk map from {DOC_CHUNK_MAP_PATH}...")
+        try:
+            with open(DOC_CHUNK_MAP_PATH, 'r', encoding='utf-8') as f:
+                doc_to_chunk_map = json.load(f)
+            print(f"Loaded map for {len(doc_to_chunk_map)} documents.")
+        except FileNotFoundError:
+            print(f"Error: Map file {DOC_CHUNK_MAP_PATH} not found. Please run chunking again.")
+            exit()
+        except Exception as e:
+            print(f"Error loading map file: {e}")
+            exit()
+
+    # == Step 3: Generate Triplets ==
+    print(f"\nStarting Step 3: Creating Triplets for MatchZoo (Split: {split_type})...")
+    # 1. Queries
+    print(f"Using {len(queries)} queries loaded from BEIR.")
+    # 2. Qrels -> query_positive_docs
+    print("Processing qrels from BEIR...")
+    query_positive_docs = {}
+    for qid, doc_scores in qrels.items():
+        positive_docs = {doc_id for doc_id, score in doc_scores.items() if score > 0}
+        if positive_docs: query_positive_docs[qid] = positive_docs
+    print(f"Processed relevance information for {len(query_positive_docs)} queries.")
+
+    # 3. Load Chunks Data
+    print(f"Loading chunks data from {CHUNKS_OUTPUT_PATH}...")
+    chunks_data = {}
+    try:
+        with open(CHUNKS_OUTPUT_PATH, 'r', encoding='utf-8') as f:
+            # Thêm tqdm vào đây nếu file chunks lớn
+            for line in tqdm(f, desc="Loading Chunks"):
+                try:
+                    chunk_info = json.loads(line)
+                    # Chỉ lưu text nếu cần, hoặc lưu cả object nếu cần thêm thông tin
+                    chunks_data[chunk_info['chunk_id']] = chunk_info['text']
+                except json.JSONDecodeError as e:
+                    # print(f"Skipping invalid JSON line: {e}") # Bỏ comment nếu muốn xem lỗi JSON
+                    continue
+        print(f"Loaded text for {len(chunks_data)} chunks.")
+    except FileNotFoundError:
+        print(f"Error: Chunks file not found at {CHUNKS_OUTPUT_PATH}")
+        exit()
+    except Exception as e:
+        print(f"An error occurred loading chunks data: {e}")
+        exit()
+
+    all_chunk_ids = list(chunks_data.keys())
+    if not all_chunk_ids:
+        print("Error: No chunks loaded from file. Cannot generate triplets.")
+        exit()
+
+    # 4. Map qid -> set(positive_chunk_id)
+    print("Mapping queries to positive chunk IDs...")
+    query_positive_chunks = {} # <-- SỬA LỖI: Khởi tạo dictionary Ở ĐÂY, bên ngoài vòng lặp
+    found_positive_mappings = 0
+    for qid, pos_doc_ids in tqdm(query_positive_docs.items(), desc="Mapping Positive Chunks"):
+        # query_positive_chunks[qid] = set() # Khởi tạo set cho mỗi qid có trong qrels
+        current_positive_chunks = set()
+        for doc_id in pos_doc_ids:
+            # Kiểm tra xem doc_id có trong map được tạo/tải từ Step 2 không
+            if doc_id in doc_to_chunk_map:
+                # Lấy danh sách chunk_id cho doc_id đó
+                chunk_ids_for_doc = doc_to_chunk_map.get(doc_id, []) # Dùng .get để an toàn
+                for chunk_id in chunk_ids_for_doc:
+                    # Kiểm tra xem chunk_id có thực sự tồn tại trong dữ liệu chunks đã tải không
+                    if chunk_id in chunks_data:
+                        current_positive_chunks.add(chunk_id)
+        # Chỉ thêm vào dict nếu tìm thấy chunk dương nào đó
+        if current_positive_chunks:
+            query_positive_chunks[qid] = current_positive_chunks
+            found_positive_mappings += 1
+
+    print(f"Found positive chunk mappings for {found_positive_mappings} queries.")
+    if found_positive_mappings == 0:
+        print("Warning: No positive chunks could be mapped to any query based on the processed documents and qrels. No triplets will be generated.")
+        # Có thể dừng ở đây nếu muốn
+        # exit()
+
+    # 5. Generate Triplets
+    # <<< SỬA ĐỔI: Sử dụng OUTPUT_TRIPLETS_PATH >>>
+    print(f"Generating triplets and saving to {OUTPUT_TRIPLETS_PATH}...")
+    triplets_count = 0
+    try:
+        # <<< SỬA ĐỔI: Sử dụng OUTPUT_TRIPLETS_PATH >>>
+        with open(OUTPUT_TRIPLETS_PATH, 'w', encoding='utf-8') as f_out:
+            query_ids = list(queries.keys())
+            random.shuffle(query_ids)
+
+            for qid in tqdm(query_ids, desc=f"Generating Triplets ({split_type})"):
+                # Kiểm tra xem qid có query_text, có trong mapping và có chunk dương không
+                if qid not in queries or qid not in query_positive_chunks: # Đã kiểm tra set rỗng ở bước 4
+                    continue
+
+                query_text = clean_text(queries[qid])
+                positive_chunk_ids_for_query = query_positive_chunks[qid]
+
+                # Lặp qua từng chunk dương cho query này
+                for positive_chunk_id in positive_chunk_ids_for_query:
+                    positive_chunk_text = chunks_data.get(positive_chunk_id)
+                    if not positive_chunk_text: continue # Bỏ qua nếu không tìm thấy text (dù không nên xảy ra)
+
+                    # Lấy mẫu negative chunk
+                    negative_chunk_id = None
+                    attempts = 0
+                    max_attempts = len(all_chunk_ids) # Giới hạn số lần thử để tránh vòng lặp vô hạn
+                    while attempts < max_attempts:
+                        potential_negative_id = random.choice(all_chunk_ids)
+                        # Đảm bảo negative không nằm trong tập positive của query HIỆN TẠI
+                        if potential_negative_id not in positive_chunk_ids_for_query:
+                            negative_chunk_id = potential_negative_id
+                            break
+                        attempts += 1
+
+                    # Nếu tìm được negative hợp lệ
+                    if negative_chunk_id:
+                        negative_chunk_text = chunks_data.get(negative_chunk_id)
+                        if negative_chunk_text: # Đảm bảo negative chunk có text
+                            # <<< SỬA ĐỔI: Ghi vào f_out >>>
+                            f_out.write(f"{query_text}\t{clean_text(positive_chunk_text)}\t{clean_text(negative_chunk_text)}\n")
+                            triplets_count += 1
+                            # Kiểm tra giới hạn triplets
+                            if MAX_TRIPLETS_TO_GENERATE is not None and triplets_count >= MAX_TRIPLETS_TO_GENERATE:
+                                print(f"\nReached limit of {MAX_TRIPLETS_TO_GENERATE} triplets.")
+                                raise StopIteration # Dùng exception để thoát khỏi các vòng lặp lồng nhau
+
+                # Kiểm tra lại giới hạn sau khi xử lý hết positive chunks cho 1 query
+                if MAX_TRIPLETS_TO_GENERATE is not None and triplets_count >= MAX_TRIPLETS_TO_GENERATE:
+                    break # Thoát vòng lặp duyệt query
+
+    except StopIteration:
+        pass
+    except Exception as e:
+        print(f"An error occurred generating triplets: {e}")
         import traceback
         traceback.print_exc()
-        exit()
 
-    print(f"\nFinished chunking {processed_docs} documents.") # Add newline
-    print(f"Total chunks created: {len(chunk_to_doc_map)}")
-    print(f"Chunks saved to: {CHUNKS_OUTPUT_PATH}")
-
-    print("Saving mapping files...")
-    try:
-        with open(CHUNK_DOC_MAP_PATH, 'w', encoding='utf-8') as f: json.dump(chunk_to_doc_map, f)
-        print(f"Chunk -> Doc map saved to: {CHUNK_DOC_MAP_PATH}")
-        with open(DOC_CHUNK_MAP_PATH, 'w', encoding='utf-8') as f: json.dump(doc_to_chunk_map, f)
-        print(f"Doc -> Chunk map saved to: {DOC_CHUNK_MAP_PATH}")
-    except Exception as e: print(f"Error saving mapping files: {e}")
-
-else:
-    print(f"Chunk files for method '{selected_method}' already exist. Skipping Step 2.")
-    print(f"Loading existing Doc -> Chunk map from {DOC_CHUNK_MAP_PATH}...")
-    try:
-        with open(DOC_CHUNK_MAP_PATH, 'r', encoding='utf-8') as f:
-            doc_to_chunk_map = json.load(f)
-        print(f"Loaded map for {len(doc_to_chunk_map)} documents.")
-    except FileNotFoundError:
-        print(f"Error: Map file {DOC_CHUNK_MAP_PATH} not found. Please run chunking again.")
-        exit()
-    except Exception as e:
-        print(f"Error loading map file: {e}")
-        exit()
-
-# == Step 3: Generate Triplets ==
-print(f"\nStarting Step 3: Creating Triplets for MatchZoo...")
-# 1. Queries
-print(f"Using {len(queries)} queries loaded from BEIR.")
-# 2. Qrels -> query_positive_docs
-print("Processing qrels from BEIR...")
-query_positive_docs = {}
-for qid, doc_scores in qrels.items():
-    positive_docs = {doc_id for doc_id, score in doc_scores.items() if score > 0}
-    if positive_docs: query_positive_docs[qid] = positive_docs
-print(f"Processed relevance information for {len(query_positive_docs)} queries.")
-# 3. Load Chunks Data
-print(f"Loading chunks data from {CHUNKS_OUTPUT_PATH}...")
-chunks_data = {}
-try:
-    with open(CHUNKS_OUTPUT_PATH, 'r', encoding='utf-8') as f:
-        for line in tqdm(f, desc="Loading Chunks"):
-            try:
-                chunk_info = json.loads(line)
-                chunks_data[chunk_info['chunk_id']] = chunk_info['text']
-            except json.JSONDecodeError: continue
-    print(f"Loaded text for {len(chunks_data)} chunks.")
-except FileNotFoundError: print(f"Error: Chunks file not found at {CHUNKS_OUTPUT_PATH}"); exit()
-except Exception as e: print(f"An error occurred loading chunks data: {e}"); exit()
-all_chunk_ids = list(chunks_data.keys())
-if not all_chunk_ids: print("Error: No chunks loaded."); exit()
-# 4. Map qid -> set(positive_chunk_id)
-query_positive_chunks = {}
-print("Mapping queries to positive chunk IDs...")
-for qid, pos_doc_ids in tqdm(query_positive_docs.items(), desc="Mapping Positive Chunks"):
-    query_positive_chunks[qid] = set()
-    for doc_id in pos_doc_ids:
-        if doc_id in doc_to_chunk_map:
-            for chunk_id in doc_to_chunk_map[doc_id]:
-                if chunk_id in chunks_data: query_positive_chunks[qid].add(chunk_id)
-# 5. Generate Triplets
-print(f"Generating triplets and saving to {TRAIN_TRIPLETS_PATH}...")
-triplets_count = 0
-try:
-    with open(TRAIN_TRIPLETS_PATH, 'w', encoding='utf-8') as f_train_out:
-        query_ids = list(queries.keys())
-        random.shuffle(query_ids)
-        for qid in tqdm(query_ids, desc="Generating Triplets"):
-            if qid not in queries or qid not in query_positive_chunks or not query_positive_chunks[qid]: continue
-            query_text = clean_text(queries[qid])
-            positive_chunk_ids_for_query = query_positive_chunks[qid]
-            for positive_chunk_id in positive_chunk_ids_for_query:
-                positive_chunk_text = chunks_data.get(positive_chunk_id)
-                if not positive_chunk_text: continue
-                negative_chunk_id = None
-                for _ in range(10):
-                    potential_negative_id = random.choice(all_chunk_ids)
-                    if potential_negative_id not in positive_chunk_ids_for_query:
-                        negative_chunk_id = potential_negative_id
-                        break
-                if negative_chunk_id:
-                    negative_chunk_text = chunks_data.get(negative_chunk_id)
-                    if negative_chunk_text:
-                        f_train_out.write(f"{query_text}\t{positive_chunk_text}\t{negative_chunk_text}\n")
-                        triplets_count += 1
-                        if MAX_TRIPLETS_TO_GENERATE is not None and triplets_count >= MAX_TRIPLETS_TO_GENERATE:
-                            print(f"\nReached limit of {MAX_TRIPLETS_TO_GENERATE} triplets.")
-                            raise StopIteration
-            if MAX_TRIPLETS_TO_GENERATE is not None and triplets_count >= MAX_TRIPLETS_TO_GENERATE: break
-except StopIteration: pass
-except Exception as e:
-    print(f"An error occurred generating triplets: {e}")
-    import traceback
-    traceback.print_exc()
-
-print(f"Finished generating {triplets_count} triplets.")
-print(f"Training triplets saved to: {TRAIN_TRIPLETS_PATH}")
-print(f"\n--- Steps 1, 2 and 3 (Chunking: {selected_method}, Triplet Generation for MatchZoo using BEIR) Completed ---")
-print(f"Output file for MatchZoo training: {TRAIN_TRIPLETS_PATH}")
+    print(f"Finished generating {triplets_count} triplets.")
+    # <<< SỬA ĐỔI: Sử dụng OUTPUT_TRIPLETS_PATH >>>
+    print(f"Output triplets saved to: {OUTPUT_TRIPLETS_PATH}")
+    print(f"\n--- Steps 1, 2 and 3 (Chunking: {selected_method}, Triplet Generation for Split: {split_type}) Completed ---")
+    # <<< SỬA ĐỔI: Sử dụng OUTPUT_TRIPLETS_PATH >>>
+    print(f"Output file for MatchZoo processing: {OUTPUT_TRIPLETS_PATH}")
+    if split_type == 'train':
+        print("Next step: Use this TSV file to fine-tune your model using MatchZoo (Step 4).")
+    else: # test
+        print("Next step: Use this TSV file (or the generated chunks/maps) for evaluating your model.")

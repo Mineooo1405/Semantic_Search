@@ -1,31 +1,18 @@
-#Sentence Detector
-    #en_core_web_sm = nhỏ gọn, nhanh, đủ xài cho câu đơn.
-pip install spacy
-
-python -m spacy download en_core_web_sm
-
-    #en_core_web_trf = chính xác cao, hiểu ngữ cảnh, dùng transformer.
-pip install spacy-transformers
-
-python -m spacy download en_core_web_trf
-
-#OIE 
-pip install openie
-
-#Database
-pip install psycopg2
-
-#DataProcess
-pip install ast #use for dataset processing
-
-#run sentence detector
-python Sentence_Detector.py -i input.txt -o report_oie.txt --simplify -f
-
-embedding: ollama | Bert model | Gemini | AWS Bedroc 
-IR Matchzoo
-
-revised chunk with OIE'
-revised query
-
-pip install beir nltk pandas tqdm psycopg2-binary python-dotenv matplotlib seaborn spacy pgvector sentence-transformers
-python -m spacy download en_core_web_sm
+keras == 2.3.0
+tabulate >= 0.8.2
+tensorflow >= 2.0.0
+nltk >= 3.2.3
+numpy >= 1.14
+tqdm >= 4.23.4
+dill >= 0.2.7.1
+hyperopt >= 0.1.1
+pandas == 0.24.2
+networkx >= 2.1
+h5py >= 2.8.0
+coverage >= 4.3.4
+codecov >= 2.0.15
+pytest >= 3.7.4
+pytest-cov >= 2.4.0
+flake8 >= 3.6.0
+flake8_docstrings >= 1.3.0
+pydocstyle == 2.1
