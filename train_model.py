@@ -71,8 +71,62 @@ def load_glove_embeddings(path, term_index, embedding_dim):
     print(f"Built embedding matrix: {hits} words found, {misses} words missing.")
     return embedding_matrix
 
-# --- 1. Constants ---
-TRAIN_DATA_PATH = "D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/msmarco_semantic-grouping_train_triplets.tsv"
+# --- Helper function to get and validate TRAIN_DATA_PATH ---
+def get_validated_train_data_path():
+    """
+    Prompts the user for the training data path and validates it for chunk type.
+    Returns the validated path and the determined chunk type.
+    """
+    default_train_path = "D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_triplets.tsv"
+    allowed_chunk_keywords = {
+        "semantic-grouping": "grouping",
+        "semantic-splitter": "splitter",
+        "text-splitter": "text" # Assuming 'text-splitter' in path means 'length' type
+    }
+    
+    while True:
+        print("\n--- Input Training Data Path ---")
+        user_path = input(f"Enter the full path to your training triplets file (e.g., .tsv)\n(default: {default_train_path}): ").strip()
+        if not user_path:
+            user_path = default_train_path
+
+        if not os.path.exists(user_path) or not os.path.isfile(user_path):
+            print(f"Error: File not found or not a file at '{user_path}'. Please try again.")
+            continue
+
+        try:
+            # Expect path like .../dataset_chunkmethod/split_run_num/triplets_file.tsv
+            # The directory containing chunk method info is 3 levels up from the file
+            method_indicator_from_path = user_path.split(os.sep)[-3].lower()
+            
+            current_chunk_type = None
+            for keyword, type_name in allowed_chunk_keywords.items():
+                if keyword in method_indicator_from_path:
+                    current_chunk_type = type_name
+                    break
+            
+            if current_chunk_type:
+                print(f"Detected chunk type: {current_chunk_type} from path.")
+                return user_path, current_chunk_type
+            else:
+                print(f"Error: Could not determine a valid chunk type (e.g., 'semantic-grouping', 'semantic-splitter', 'text-splitter')")
+                print(f"from the directory structure of the path: '{user_path}'.")
+                print(f"Expected the directory name '{user_path.split(os.sep)[-3]}' to contain one of these keywords.")
+                print("Please ensure the path points to a file within a correctly named chunk type directory.")
+                
+        except IndexError:
+            print(f"Error: The provided path '{user_path}' does not have the expected directory structure.")
+            print("Expected path format like .../dataset_chunkmethod/split_run_num/triplets_file.tsv")
+        
+        retry = input("Do you want to try entering the path again? (yes/no): ").strip().lower()
+        if retry != 'yes':
+            print("Exiting due to invalid training data path.")
+            sys.exit(1)
+
+# --- 1. Constants and User Inputs ---
+# Get TRAIN_DATA_PATH and chunk_type_for_folder from user
+TRAIN_DATA_PATH, chunk_type_for_folder = get_validated_train_data_path()
+
 # Specify path to your GloVe file
 GLOVE_PATH = "D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt" # <<<--- !!! UPDATE THIS PATH !!!
 EMBEDDING_DIM = 100 # Should match the GloVe file dimension
@@ -80,7 +134,16 @@ EMBEDDING_DIM = 100 # Should match the GloVe file dimension
 MODEL_NAME_TO_RUN = "KNRM"      # Use KNRM instead
 # or
 # MODEL_NAME_TO_RUN = "MVLSTM"    # Use MVLSTM instead
-MODEL_OUTPUT_DIR = f"D:/SemanticSearch/TrainedModels/{MODEL_NAME_TO_RUN}_mz210"
+
+# --- Dynamically create MODEL_OUTPUT_DIR based on TRAIN_DATA_PATH and current date ---
+# chunk_type_for_folder is now obtained from get_validated_train_data_path()
+
+current_date_str = datetime.now().strftime("%Y%m%d")
+base_trained_models_dir = "D:/SemanticSearch/TrainedModels"
+
+MODEL_OUTPUT_DIR = os.path.join(base_trained_models_dir, f"model_{MODEL_NAME_TO_RUN}_{chunk_type_for_folder}_{current_date_str}")
+# --- End of dynamic MODEL_OUTPUT_DIR creation ---
+
 BATCH_SIZE = 128 # Can often be larger for non-BERT models
 EPOCHS = 5 # Adjust as needed
 LEARNING_RATE = 1e-3 # Common starting point for these models
@@ -375,10 +438,109 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
-# ...sau khi train xong...
-model.save(MODEL_OUTPUT_DIR)
-print(f"MatchZoo model saved to {MODEL_OUTPUT_DIR}")
+# <<< MODIFIED SECTION FOR SAVING MODEL >>>
+print(f"Preparing to save MatchZoo model components to: {MODEL_OUTPUT_DIR}")
 
-exit() # Exit after training for now
+# Print model.params for inspection
+print("\n--- Inspecting model.params before saving ---")
+if hasattr(model, 'params'):
+    print(f"model.params type: {type(model.params)}")
+    try:
+        if hasattr(model.params, 'to_dict'):
+            print(f"model.params content: {model.params.to_dict()}")
+        elif isinstance(model.params, dict):
+            print(f"model.params content: {model.params}")
+        else:
+            print(f"model.params content (raw): {model.params}") # Should show ParamTable
+    except Exception as e_params_print:
+        print(f"Could not print model.params details: {e_params_print}")
+else:
+    print("model.params attribute not found.")
+print("--- End of model.params inspection ---\n")
+
+
+temp_mz_save_dir = MODEL_OUTPUT_DIR + "_temp_mz_save"
+import shutil
+
+if os.path.exists(temp_mz_save_dir):
+    print(f"Removing existing temporary MatchZoo save directory: {temp_mz_save_dir}")
+    shutil.rmtree(temp_mz_save_dir)
+
+print(f"Attempting to save MatchZoo model core files to temporary location: {temp_mz_save_dir}")
+model_save_successful = False
+try:
+    model.save(temp_mz_save_dir)
+    print(f"model.save() call completed for {temp_mz_save_dir}")
+    model_save_successful = True
+
+    if os.path.exists(temp_mz_save_dir) and os.path.isdir(temp_mz_save_dir):
+        print(f"Temporary directory {temp_mz_save_dir} exists.")
+        temp_dir_contents = os.listdir(temp_mz_save_dir)
+        print(f"Contents of {temp_mz_save_dir}: {temp_dir_contents}")
+        if not temp_dir_contents:
+            print(f"WARNING: {temp_mz_save_dir} was created but is EMPTY after model.save().")
+            model_save_successful = False # Treat as failure if empty
+    else:
+        print(f"ERROR: Temporary directory {temp_mz_save_dir} was NOT created by model.save() or is not a directory.")
+        model_save_successful = False
+
+except Exception as e_model_save:
+    print(f"!!! CRITICAL ERROR during model.save('{temp_mz_save_dir}') call: {e_model_save} !!!")
+    import traceback
+    traceback.print_exc()
+    model_save_successful = False
+
+if model_save_successful:
+    print(f"Proceeding to copy files from {temp_mz_save_dir} to {MODEL_OUTPUT_DIR}")
+    # <<< SỬA ĐỔI TÊN FILE MONG ĐỢI >>>
+    # MatchZoo 2.1.0 model.save() seems to create params.dill and backend_weights.h5
+    # config.json might not be created by default with this save method.
+    matchzoo_core_files_to_copy = {
+        'params.dill': 'params.dill',             # Source name : Destination name
+        'backend_weights.h5': 'backend_weights.h5'  # Source name : Destination name
+        # 'config.json': 'config.json' # config.json might not be generated by model.save()
+    }
+    all_files_copied_successfully = True
+
+    for source_filename, dest_filename in matchzoo_core_files_to_copy.items():
+        temp_file_path = os.path.join(temp_mz_save_dir, source_filename)
+        final_file_path = os.path.join(MODEL_OUTPUT_DIR, dest_filename)
+
+        if os.path.exists(final_file_path):
+            try:
+                os.remove(final_file_path)
+            except Exception as e_remove_old:
+                print(f"Warning: Could not remove old version of {final_file_path}. Error: {e_remove_old}")
+
+        if os.path.exists(temp_file_path):
+            try:
+                shutil.copy2(temp_file_path, final_file_path)
+                print(f"Copied {source_filename} to {final_file_path}")
+            except Exception as e_copy:
+                print(f"Error copying {source_filename} to {final_file_path}: {e_copy}")
+                all_files_copied_successfully = False
+        else:
+            print(f"Warning: Expected file {source_filename} not found in temporary save directory {temp_mz_save_dir}. Cannot copy.")
+            all_files_copied_successfully = False
+    
+    if all_files_copied_successfully:
+        print(f"MatchZoo model components successfully integrated into: {MODEL_OUTPUT_DIR}")
+    else:
+        print(f"Warning: Not all expected MatchZoo core files could be copied to {MODEL_OUTPUT_DIR}.")
+else:
+    print(f"Skipping file copying because model.save() to {temp_mz_save_dir} failed or did not produce the expected directory/files.")
+
+print(f"Final model artifacts are in: {MODEL_OUTPUT_DIR}")
+print(f"Contents of {MODEL_OUTPUT_DIR}: {os.listdir(MODEL_OUTPUT_DIR) if os.path.exists(MODEL_OUTPUT_DIR) else 'Directory not found'}")
+
+if os.path.exists(temp_mz_save_dir):
+    print(f"Removing temporary MatchZoo save directory: {temp_mz_save_dir}")
+    try:
+        shutil.rmtree(temp_mz_save_dir)
+    except Exception as e_rm_temp:
+        print(f"Warning: Could not remove temporary directory {temp_mz_save_dir}. Error: {e_rm_temp}")
+# <<< END OF MODIFIED SECTION >>>
+
+exit()
 
 

@@ -12,29 +12,9 @@ import numpy as np
 from typing import List, Tuple, Dict, Callable, Optional, Union
 import concurrent.futures
 import functools
-
-try:
-    from Semantic_Grouping import semantic_chunk_passage_from_grouping_logic
-except ImportError:
-    print("WARNING: Could not import 'semantic_chunk_passage_from_grouping_logic' from Semantic_Grouping.py. Semantic Grouping method will not be available.")
-    def semantic_chunk_passage_from_grouping_logic(*args, **kwargs):
-        print("ERROR: Semantic Grouping logic not available.")
-        return []
-try:
-    from Semantic_Splitter import chunk_passage_semantic_splitter
-except ImportError:
-    print("WARNING: Could not import 'chunk_passage_semantic_splitter'. Semantic Splitter method will not be available.")
-    def chunk_passage_semantic_splitter(*args, **kwargs):
-        print("ERROR: Semantic Splitter logic not available.")
-        return []
-try:
-    from Text_Splitter import chunk_passage_text_splitter
-except ImportError:
-    print("WARNING: Could not import 'chunk_passage_text_splitter'. Text Splitter method will not be available.")
-    def chunk_passage_text_splitter(*args, **kwargs):
-        print("ERROR: Text Splitter logic not available.")
-        return []
-
+from Semantic_Grouping import semantic_chunk_passage_from_grouping_logic
+from Semantic_Splitter import chunk_passage_semantic_splitter
+from Text_Splitter import chunk_passage_text_splitter    
 
 # --- UI Helper Functions ---
 # (get_input, get_int_input, get_float_input, get_auto_or_float_input, select_chunking_method, get_common_params giữ nguyên)
