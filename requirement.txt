@@ -1,18 +1,31 @@
-keras == 2.3.0
-tabulate >= 0.8.2
-tensorflow >= 2.0.0
-nltk >= 3.2.3
-numpy >= 1.14
-tqdm >= 4.23.4
-dill >= 0.2.7.1
-hyperopt >= 0.1.1
-pandas == 0.24.2
-networkx >= 2.1
-h5py >= 2.8.0
-coverage >= 4.3.4
-codecov >= 2.0.15
-pytest >= 3.7.4
-pytest-cov >= 2.4.0
-flake8 >= 3.6.0
-flake8_docstrings >= 1.3.0
-pydocstyle == 2.1
+# --- Core Libraries for Examples ---
+
+# For PyTerrier examples
+python-terrier
+pyterrier_transformers >= 0.4.0 # Để sử dụng pt.text.CrossRanker
+# Lưu ý: PyTerrier có thể yêu cầu cài đặt Java JDK để hoạt động đầy đủ.
+
+# For OpenMatch conceptual example and general Transformer usage
+transformers >= 4.10 # Thư viện Hugging Face cho tokenizers và models
+torch >= 1.9       # PyTorch, backend chính
+
+# --- Common Useful Libraries ---
+pandas >= 1.5      # Phiên bản pandas hiện đại
+numpy >= 1.22      # Phiên bản numpy tương thích Python 3.10+
+nltk >= 3.7        # Cho xử lý văn bản (nếu cần)
+tqdm >= 4.60       # Thanh tiến trình
+dill >= 0.3.4      # Lưu/tải object Python
+h5py >= 3.1        # Thường dùng để lưu trọng số model
+scikit-learn       # Cho các chỉ số đánh giá hoặc tiện ích ML
+
+# --- Notes ---
+# Thư viện OpenMatch thường được cài đặt từ mã nguồn (GitHub) thay vì pip.
+# File này chủ yếu bao gồm các phụ thuộc cho ví dụ PyTerrier và Transformers.
+
+# --- Optional: For Development, Linting, Testing (Remove if not needed for execution) ---
+# pytest
+# flake8
+# pydocstyle
+
+# --- Optional: For pretty-printing tables (if your scripts use it) ---
+# tabulate>=0.8.7

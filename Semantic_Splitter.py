@@ -4,7 +4,8 @@ import json # Not needed for chunking function
 import numpy as np
 from dotenv import load_dotenv
 import os
-from typing import List, Tuple # Adjusted typing import
+import traceback
+from typing import List, Tuple, Optional # Adjusted typing import
 from Tool.Sentence_Detector import extract_and_simplify_sentences
 # --- Use the standard embedding function ---
 from Tool.Sentence_Embedding import sentence_embedding as embed_text_list_tool
@@ -18,6 +19,8 @@ import pickle # Not needed for chunking function
 import hashlib
 from Tool.Database import connect_to_db # Not needed for chunking function
 from Tool.OIE import extract_triples_for_search # Not needed for chunking function
+from sklearn.metrics.pairwise import cosine_similarity
+import gc # Thêm import gc
 load_dotenv()
 
 def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
@@ -58,44 +61,55 @@ def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
     return vectors
 
 def create_semantic_matrix(vectors):
-    """Tạo ma trận dựa trên cosine similarity"""
-    vectors_array = np.array(vectors)
-    n = len(vectors_array)
-    similarity_matrix = np.zeros((n, n))
+    """Tạo ma trận dựa trên cosine similarity sử dụng sklearn cho hiệu suất cao."""
+    # Di chuyển việc kiểm tra vectors rỗng sau khi thử chuyển đổi sang numpy array
+    # và kiểm tra dựa trên shape của array.
 
-    # Hiển thị tiến độ tính toán
-    total_comparisons = n * n
-    completed = 0
+    # Chuyển đổi danh sách các vector (có thể là list của numpy arrays riêng lẻ)
+    # thành một ma trận numpy 2D duy nhất.
+    # Giả định rằng tất cả các vector có cùng số chiều.
+    try:
+        # Đảm bảo vectors không phải là None trước khi tạo np.array
+        if vectors is None:
+            print("  Lỗi create_semantic_matrix: Đầu vào vectors là None.")
+            return np.array([])
+
+        vectors_array = np.array(vectors)
+        
+        # Kiểm tra sau khi đã cố gắng tạo array
+        if vectors_array.size == 0: # Nếu array rỗng (ví dụ từ list rỗng ban đầu)
+            return np.array([])
+
+        if vectors_array.ndim == 1: # Trường hợp list các vector 1D (ví dụ: output từ embed_text_list là list of arrays)
+            # Cần stack chúng lại thành ma trận 2D
+            # Kiểm tra xem có phải là list of lists/arrays không
+            if isinstance(vectors[0], (list, np.ndarray)) and len(vectors) > 0:
+                 vectors_array = np.vstack(vectors)
+            else: # Nếu là một vector phẳng duy nhất (không hợp lệ cho cosine_similarity với nhiều items) hoặc list rỗng đã xử lý
+                  print("  Lỗi create_semantic_matrix: Đầu vào vectors không hợp lệ để tạo ma trận 2D.")
+                  return np.array([])
+
+        if vectors_array.ndim != 2:
+            print(f"  Lỗi create_semantic_matrix: vectors_array có số chiều không mong muốn ({vectors_array.ndim}). Cần ma trận 2D.")
+            return np.array([])
+        
+        # Kiểm tra này có thể không cần thiết nữa nếu đã kiểm tra vectors_array.size == 0 ở trên
+        # và ndim == 2 ngụ ý shape[0] >= 0
+        # if vectors_array.shape[0] < 1: # Không có vector nào
+        #     return np.array([])
+
+    except Exception as e:
+        print(f"  Lỗi khi chuyển đổi vectors thành numpy array trong create_semantic_matrix: {e}")
+        return np.array([])
+
+    print(f"  Đang tính toán ma trận tương đồng cho {vectors_array.shape[0]} vector...")
     start_time = time.time()
     
-    for i in range(n):
-        vector_i = vectors_array[i]
-        norm_i = np.sqrt(np.sum(vector_i ** 2))
-        
-        for j in range(n):
-            vector_j = vectors_array[j]
-            
-            # Tính tích vô hướng (dot product)
-            dot_product = np.sum(vector_i * vector_j)
-            
-            # Tính độ dài (norm) của vector j
-            norm_j = np.sqrt(np.sum(vector_j ** 2))
-            
-            # Tránh chia cho 0
-            if norm_i == 0 or norm_j == 0:
-                similarity_matrix[i, j] = 0
-            else:
-                # Công thức tính cosine similarity
-                similarity_matrix[i, j] = dot_product / (norm_i * norm_j)
-            
-            completed += 1
-            if completed % (n * 5) == 0 or completed == total_comparisons:
-                elapsed = time.time() - start_time
-                progress = completed / total_comparisons
-                eta = (elapsed / progress) * (1 - progress) if progress > 0 else 0
-                print(f"Tiến độ: {completed}/{total_comparisons} ({progress*100:.1f}%) - ETA: {eta:.1f}s", end="\r")
+    similarity_matrix = cosine_similarity(vectors_array).astype(np.float32)
     
-    print(f"\nThống kê ma trận: min={similarity_matrix.min():.4f}, max={similarity_matrix.max():.4f}, mean={similarity_matrix.mean():.4f}")
+    elapsed_time = time.time() - start_time
+    print(f"  Hoàn thành tính toán ma trận tương đồng trong {elapsed_time:.2f}s.")
+    print(f"  Thống kê ma trận: min={similarity_matrix.min():.4f}, max={similarity_matrix.max():.4f}, mean={similarity_matrix.mean():.4f}")
     return similarity_matrix
 
 def analyze_similarity_distribution(similarity_matrix, sentences=None):
@@ -273,7 +287,6 @@ def semantic_sequential_spreading(sentences, similarity_matrix,
             add_reason = get_add_reason(sim, current_threshold, avg_local_trend, len(current_segment), min_chunk_len)
             current_segment.append(next_idx)
             last_idx = next_idx
-            print(add_reason)
         
         # Thêm đoạn hiện tại vào kết quả
         segments.append(current_segment)
@@ -930,10 +943,151 @@ def chunk_passage_semantic_splitter(
             chunk_sentences = [sentences[sent_idx] for sent_idx in segment]
             chunk_text = " ".join(chunk_sentences).strip()
             if chunk_text:
-                chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:10]
-                chunk_id = f"{doc_id}_{chunk_hash}_{segment_idx}" # Thêm segment_idx để tránh trùng hash
+                # Sử dụng hashlib.sha1 cho nhất quán với Semantic_Grouping.py và ngắn hơn
+                try:
+                    chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
+                except Exception:
+                    chunk_hash = "nohash" # Fallback
+                chunk_id = f"{doc_id}_splitter_chunk{segment_idx}_hash{chunk_hash}" # Thêm segment_idx và "splitter"
                 chunks_result.append((chunk_id, chunk_text))
 
     except Exception as e:
         print(f"Error chunking doc {doc_id} with Semantic Splitter: {e}")
+        import traceback
+        traceback.print_exc()
+    return chunks_result
+
+# --- THÊM HÀM HELPER CHO BATCH EMBEDDING (tương tự Semantic_Grouping.py) ---
+def embed_sentences_in_batches_splitter(sentences: List[str], model_name: str, batch_size: int = 32) -> Optional[np.ndarray]:
+    """Nhúng danh sách câu theo lô để giảm sử dụng bộ nhớ."""
+    if not sentences:
+        return None
+    all_embeddings = []
+    print(f"  SemanticSplitter: Embedding {len(sentences)} sentences in batches of {batch_size} using {model_name}...")
+    try:
+        # Sử dụng trực tiếp hàm sentence_embedding đã import với alias embed_text_list_tool
+        # Hàm sentence_embedding đã có xử lý batch_size nội bộ qua model.encode
+        # và cũng xử lý việc tải model dựa trên model_name_or_path
+        
+        # Gọi một lần cho tất cả các câu, hàm sentence_embedding sẽ xử lý batching
+        embeddings_array = embed_text_list_tool(
+            sentences, 
+            model_name_or_path=model_name, 
+            batch_size=batch_size # Truyền batch_size vào đây
+        )
+        
+        # print(f"    Finished embedding {len(sentences)} sentences.         ") # Xóa dòng này nếu sentence_embedding có show_progress_bar
+        if embeddings_array is None:
+            return None
+        
+        # Đảm bảo output là numpy array
+        if hasattr(embeddings_array, 'cpu'): # Check if it's a PyTorch tensor
+            embeddings_array = embeddings_array.cpu().numpy()
+        elif not isinstance(embeddings_array, np.ndarray):
+            embeddings_array = np.array(embeddings_array)
+
+        gc.collect()
+        return embeddings_array
+
+    except Exception as e:
+        print(f"\nError during batched embedding in SemanticSplitter: {e}")
+        traceback.print_exc() # Thêm traceback để xem chi tiết lỗi
+        if 'all_embeddings' in locals() and all_embeddings: # Mặc dù không còn dùng all_embeddings trực tiếp
+            del all_embeddings
+        gc.collect()
+        return None
+# --- KẾT THÚC HÀM HELPER ---
+
+# --- SỬA ĐỔI HÀM CHUNKING CHÍNH ---
+def chunk_passage_semantic_splitter(
+    doc_id: str,
+    passage_text: str,
+    model_name: str = "thenlper/gte-large",
+    initial_threshold: float = 0.6,
+    decay_factor: float = 0.95,
+    min_threshold: float = 0.35,
+    min_chunk_len: int = 2,
+    max_chunk_len: int = 8,
+    window_size: int = 3,
+    embedding_batch_size: int = 32, # <-- THAM SỐ MỚI
+    **kwargs 
+) -> List[Tuple[str, str]]:
+    chunks_result = []
+    sentences = None
+    sentence_vectors = None
+    sim_matrix = None
+    segments = None
+    try:
+        sentences = extract_and_simplify_sentences(passage_text, simplify=False)
+        if not sentences: return []
+        if len(sentences) == 1:
+            chunk_text = sentences[0]
+            chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
+            chunk_id = f"{doc_id}_splitter_chunk0_hash{chunk_hash}"
+            del sentences
+            gc.collect()
+            return [(chunk_id, chunk_text)]
+
+        # b. Tạo embedding cho câu THEO BATCH
+        sentence_vectors = embed_sentences_in_batches_splitter(
+            sentences, 
+            model_name=model_name, 
+            batch_size=embedding_batch_size # Sử dụng batch size
+        )
+        if sentence_vectors is None: 
+            del sentences
+            gc.collect()
+            return []
+
+        sim_matrix = create_semantic_matrix(sentence_vectors)
+        del sentence_vectors # Giải phóng vectors sau khi có sim_matrix
+        gc.collect()
+
+        if sim_matrix is None or sim_matrix.size == 0 : # Kiểm tra sim_matrix rỗng
+            del sentences
+            if sim_matrix is not None: del sim_matrix
+            gc.collect()
+            return []
+
+
+        segments = semantic_sequential_spreading(
+            sentences, sim_matrix,
+            initial_threshold=initial_threshold,
+            decay_factor=decay_factor,
+            min_threshold=min_threshold,
+            min_chunk_len=min_chunk_len,
+            max_chunk_len=max_chunk_len,
+            window_size=window_size
+        )
+        del sim_matrix # Giải phóng sim_matrix
+        gc.collect()
+
+        for segment_idx, segment_indices in enumerate(segments):
+            if not segment_indices: continue
+            chunk_sents = [sentences[sent_idx] for sent_idx in sorted(segment_indices)]
+            chunk_text = " ".join(chunk_sents).strip()
+            if chunk_text:
+                try:
+                    chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
+                except Exception:
+                    chunk_hash = "nohash"
+                chunk_id = f"{doc_id}_splitter_chunk{segment_idx}_hash{chunk_hash}"
+                chunks_result.append((chunk_id, chunk_text))
+            del chunk_sents
+            del chunk_text
+        
+        del sentences
+        del segments
+        gc.collect()
+
+    except Exception as e:
+        print(f"Error chunking doc {doc_id} with Semantic Splitter: {e}")
+        import traceback
+        traceback.print_exc()
+        # Dọn dẹp nếu có lỗi
+        if sentences is not None: del sentences
+        if sentence_vectors is not None: del sentence_vectors
+        if sim_matrix is not None: del sim_matrix
+        if segments is not None: del segments
+        gc.collect()
     return chunks_result

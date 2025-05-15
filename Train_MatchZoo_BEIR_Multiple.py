@@ -12,9 +12,18 @@ import numpy as np
 from typing import List, Tuple, Dict, Callable, Optional, Union
 import concurrent.futures
 import functools
+import traceback
+import atexit # <<< THÊM IMPORT NÀY
 from Semantic_Grouping import semantic_chunk_passage_from_grouping_logic
 from Semantic_Splitter import chunk_passage_semantic_splitter
 from Text_Splitter import chunk_passage_text_splitter    
+# Sửa đổi import nếu OIE.py đã tích hợp caching vào extract_triples
+from Tool.OIE import extract_triples, close_oie_clients # <<< THÊM close_oie_clients
+import torch # Thêm import này ở đầu file nếu chưa có
+import torch_directml # Thêm import này ở đầu file nếu chưa có
+
+# Đăng ký hàm để được gọi khi script thoát
+atexit.register(close_oie_clients) # <<< THÊM DÒNG NÀY
 
 # --- UI Helper Functions ---
 # (get_input, get_int_input, get_float_input, get_auto_or_float_input, select_chunking_method, get_common_params giữ nguyên)
@@ -93,10 +102,12 @@ def get_common_params() -> Dict:
     params['data_dir'] = get_input("Directory for BEIR data", default="./Data/msmarco", required=True)
     params['output_dir'] = get_input("Base Output Directory", default="D:/SemanticSearch/TrainingData_MatchZoo_BEIR", required=True)
     params['embedding_model'] = get_input("Embedding Model Name (for semantic methods)", default="thenlper/gte-large", required=True)
-    max_triplets = get_int_input("Max Triplets (0 for unlimited)", default=100000, required=True, min_val=0)
+    max_triplets = get_int_input("Max Triplets (0 for unlimited)", default=20000, required=True, min_val=0) # Đổi default thành 20000 như yêu cầu
     params['max_triplets'] = max_triplets if max_triplets > 0 else None
     max_docs = get_int_input("Max Documents to Process (0 or empty for all)", default=0, required=False, min_val=0)
     params['max_docs'] = max_docs if max_docs is not None and max_docs > 0 else None
+    params['include_oie'] = get_input("Include OIE features in chunks? (yes/no)", default="no").lower() == 'yes'
+    params['random_seed'] = get_int_input("Random Seed for triplet sampling (e.g., 42)", default=42, required=True) # <-- THÊM RANDOM SEED
     return params
 
 # --- MODIFIED get_semantic_grouping_params ---
@@ -133,6 +144,12 @@ def get_semantic_splitter_params(embedding_model: str) -> Dict:
     params['min_chunk_len'] = get_int_input("Min Sentences per Chunk", default=2, required=True, min_val=1)
     params['max_chunk_len'] = get_int_input("Max Sentences per Chunk", default=8, required=True, min_val=1)
     params['window_size'] = get_int_input("Trend Analysis Window Size", default=3, required=True, min_val=1)
+    params['embedding_batch_size'] = get_int_input(
+        "Embedding Batch Size (e.g., 32, 64, 128, ảnh hưởng VRAM)",
+        default=32, # Có thể tăng giá trị này cho GPU mạnh
+        required=True,
+        min_val=1
+    )
     return params
 
 def get_text_splitter_params() -> Dict:
@@ -153,23 +170,88 @@ def get_split_type() -> str:
             print("Invalid input. Please enter 'train' or 'test'.")
 
 # --- Worker Function for Parallel Chunking ---
-def chunk_document_worker(doc_item: Tuple[str, Dict], chunking_func: Callable, params: Dict) -> Tuple[str, List[Tuple[str, str]]]:
+def init_worker():
+    """Initializer for each worker process."""
+    global dml_device_worker
+    try:
+        # Cố gắng import và lấy thiết bị trong worker
+        # Điều này đảm bảo mỗi worker nhận biết được DirectML
+        import torch
+        import torch_directml
+        dml_device_worker = torch_directml.device()
+        print(f"Worker {os.getpid()} initialized with DML device: {dml_device_worker}")
+    except Exception as e:
+        print(f"Worker {os.getpid()} failed to initialize DML device: {e}")
+        dml_device_worker = None # Hoặc đặt là 'cpu'
+
+def init_worker():
+    """Initializer for each worker process."""
+    # global dml_device_worker # Không cần thiết nếu không sử dụng trực tiếp biến global này
+    try:
+        import torch # Đảm bảo import trong worker
+        import torch_directml # Đảm bảo import trong worker
+        dml_device = torch_directml.device()
+        # print(f"Worker {os.getpid()} initialized with DML device: {dml_device}") # Bỏ comment nếu cần debug
+    except Exception as e:
+        print(f"Worker {os.getpid()} failed to initialize DML device: {e}")
+        # dml_device_worker = None # Không cần gán vào biến global
+
+def chunk_document_worker(
+    doc_item: Tuple[str, Dict],
+    chunking_func: Callable,
+    params: Dict
+) -> Tuple[str, List[Tuple[str, str, Optional[str]]]]: # Đảm bảo kiểu trả về nhất quán
     doc_id, doc_data = doc_item
     try:
-        print(f"Processing document: {doc_id}")  # Thêm log
         passage_text = doc_data.get("text", "")
         title = doc_data.get("title", "")
-        full_text_to_chunk = f"{title}. {passage_text}" if title else passage_text
+        full_text_to_chunk = f"{title}. {passage_text}" if title and passage_text else passage_text or title
 
-        if not full_text_to_chunk:
-            print(f"Document {doc_id} is empty.")  # Thêm log
+        if not full_text_to_chunk.strip():
             return doc_id, []
 
-        doc_chunks = chunking_func(doc_id, full_text_to_chunk, **params)
-        print(f"Document {doc_id} processed successfully.")  # Thêm log
-        return doc_id, doc_chunks if doc_chunks else []
+        # Gọi hàm chunking gốc
+        # Các hàm semantic_grouping và semantic_splitter đã trả về List[Tuple[str, str, Optional[str]]]
+        # Hàm text_splitter trả về List[List[Tuple[str, str, Optional[str]]]]
+        raw_doc_chunks_result = chunking_func(doc_id, full_text_to_chunk, **params)
+
+        # Xử lý kết quả để đảm bảo nó luôn là List[Tuple[str, str, Optional[str]]]
+        # Điều này đặc biệt quan trọng cho text_splitter
+        final_doc_chunks: List[Tuple[str, str, Optional[str]]] = []
+        if chunking_func == chunk_passage_text_splitter:
+            # text_splitter trả về [[(id, text, oie), ...]] hoặc [[]]
+            if raw_doc_chunks_result and isinstance(raw_doc_chunks_result, list) and len(raw_doc_chunks_result) > 0:
+                final_doc_chunks = raw_doc_chunks_result[0] # Lấy list bên trong
+            else: # Trường hợp trả về [[]] hoặc một cấu trúc không mong muốn
+                final_doc_chunks = []
+        else: # Các hàm chunking khác đã trả về đúng định dạng
+            final_doc_chunks = raw_doc_chunks_result if raw_doc_chunks_result else []
+
+
+        # Logic OIE được áp dụng sau khi đã có final_doc_chunks
+        # Lưu ý: Hiện tại, các hàm chunking semantic đã có logic OIE bên trong.
+        # Nếu bạn muốn logic OIE chung ở đây, cần xem xét lại.
+        # Đoạn code OIE dưới đây giả định final_doc_chunks là List[Tuple[chunk_id, chunk_text]]
+        # và cần được điều chỉnh nếu final_doc_chunks đã chứa OIE.
+        # Hiện tại, các hàm chunking semantic đã trả về (chunk_id, chunk_text, oie_str)
+        # nên không cần xử lý OIE thêm ở đây nữa nếu include_oie đã được truyền vào params.
+
+        # if params.get('include_oie', False) and final_doc_chunks:
+        #     processed_doc_chunks_with_oie = []
+        #     for chunk_id, chunk_text, _ in final_doc_chunks: # Giả sử final_doc_chunks có 3 phần tử
+        #         # Nếu OIE đã được thêm bởi hàm chunking, không cần làm lại
+        #         # Nếu không, bạn có thể gọi get_chunk_text_with_oie ở đây
+        #         # augmented_chunk_text = get_chunk_text_with_oie(chunk_text, include_oie=True)
+        #         # processed_doc_chunks_with_oie.append((chunk_id, augmented_chunk_text, existing_oie_str))
+        #         # Tạm thời giữ nguyên vì các hàm chunking đã xử lý OIE
+        #         pass
+        #     # final_doc_chunks = processed_doc_chunks_with_oie # Cập nhật nếu có xử lý OIE ở đây
+
+        return doc_id, final_doc_chunks
+
     except Exception as e:
-        print(f"Error processing document {doc_id}: {e}")  # Thêm log
+        print(f"Error processing document {doc_id} in worker: {e}")
+        traceback.print_exc()
         return doc_id, []
 
 # --- Helper Functions ---
@@ -193,13 +275,56 @@ def find_next_run_dir(base_output_dir: str, split_prefix: str) -> str:
             return run_dir
         counter += 1
 
+# --- OIE Helper Functions ---
+def format_oie_triples_to_string(triples_list: List[Dict[str, str]]) -> str:
+    if not triples_list:
+        return ""
+    formatted_triples = []
+    for triple in triples_list:
+        s = str(triple.get('subject', '')).replace('\t', ' ').replace('\n', ' ').strip()
+        r = str(triple.get('relation', '')).replace('\t', ' ').replace('\n', ' ').strip()
+        o = str(triple.get('object', '')).replace('\t', ' ').replace('\n', ' ').strip()
+        if s and r and o: # Only include complete triples
+            formatted_triples.append(f"({s}; {r}; {o})")
+    if not formatted_triples:
+        return ""
+    return " [OIE_TRIPLES] " + " | ".join(formatted_triples) + " [/OIE_TRIPLES]"
+
+def get_chunk_text_with_oie(chunk_text: str, include_oie: bool) -> str:
+    if not include_oie or not chunk_text.strip():
+        return chunk_text
+    
+    aggregated_oie_triples = []
+    try:
+        sentences_in_chunk = nltk.sent_tokenize(chunk_text)
+        if not sentences_in_chunk:
+            return chunk_text
+
+        for sentence in sentences_in_chunk:
+            if not sentence.strip():
+                continue
+            try:
+                oie_triples_for_sentence = extract_triples(sentence) # From Tool.OIE
+                if oie_triples_for_sentence:
+                    aggregated_oie_triples.extend(oie_triples_for_sentence)
+            except Exception as e_sent_oie:
+                print(f"Warning: Error extracting OIE for sentence '{sentence[:50]}...': {e_sent_oie}")
+        
+        if aggregated_oie_triples:
+            oie_string = format_oie_triples_to_string(aggregated_oie_triples)
+            return chunk_text.strip() + oie_string 
+    except Exception as e_chunk_oie:
+        print(f"Warning: Error processing OIE for chunk: {e_chunk_oie}")
+    return chunk_text
+# --- End OIE Helper Functions ---
+
 # --- ĐẶT TOÀN BỘ LOGIC CHÍNH VÀO ĐÂY ---
 if __name__ == "__main__":
 
     # --- Get Configuration from User ---
     common_config = get_common_params()
     selected_method = select_chunking_method()
-    split_type = get_split_type() # <<< Giữ nguyên việc lấy split_type
+    split_type = get_split_type() 
 
     method_params = {}
     if selected_method == 'semantic_grouping':
@@ -208,19 +333,26 @@ if __name__ == "__main__":
         method_params = get_semantic_splitter_params(common_config['embedding_model'])
     elif selected_method == 'text_splitter':
         method_params = get_text_splitter_params()
-        method_params['model_name'] = common_config['embedding_model'] # Add model_name for consistency
+    
+    # Quan trọng: Thêm cờ include_oie vào method_params để worker có thể truy cập
+    method_params['include_oie'] = common_config.get('include_oie', False)
+    if selected_method != 'text_splitter': # text_splitter không dùng model_name trực tiếp trong params của nó
+        method_params['model_name'] = common_config['embedding_model']
+
 
     # --- Combine Configurations ---
     DATASET_NAME = common_config['dataset_name']
-    # <<< SỬA ĐỔI: Xác định thư mục cơ sở cho phương thức >>>
-    BASE_METHOD_DIR = os.path.join(common_config['output_dir'], f"{DATASET_NAME}_{selected_method.replace('_', '-')}")
+    INCLUDE_OIE = common_config.get('include_oie', False)
 
-    # <<< SỬA ĐỔI: Tìm thư mục chạy tiếp theo và đặt OUTPUT_DIR_METHOD >>>
+    method_oie_suffix = "_oie" if INCLUDE_OIE else ""
+    # Sử dụng selected_method (tên gốc) cho thư mục, thêm hậu tố vào tên file
+    # Hoặc có thể thêm vào tên thư mục nếu muốn tách biệt hoàn toàn
+    effective_method_name_for_path = f"{selected_method.replace('_', '-')}{method_oie_suffix}"
+
+    BASE_METHOD_DIR = os.path.join(common_config['output_dir'], f"{DATASET_NAME}_{effective_method_name_for_path}")
     OUTPUT_DIR_METHOD = find_next_run_dir(BASE_METHOD_DIR, split_type)
 
-    # Các đường dẫn file output sẽ tự động nằm trong thư mục con có đánh số
-    # <<< SỬA ĐỔI: Đảm bảo tên file không lặp lại split_type >>>
-    METHOD_AND_SPLIT_PREFIX = f"{DATASET_NAME}_{selected_method.replace('_', '-')}_{split_type}" # Ví dụ: msmarco_semantic-grouping_test
+    METHOD_AND_SPLIT_PREFIX = f"{DATASET_NAME}_{effective_method_name_for_path}_{split_type}"
     CHUNKS_OUTPUT_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_chunks.jsonl")
     CHUNK_DOC_MAP_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_chunk_doc_map.json")
     DOC_CHUNK_MAP_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_doc_chunk_map.json")
@@ -229,6 +361,7 @@ if __name__ == "__main__":
     EMBEDDING_MODEL_NAME = common_config['embedding_model']
     MAX_TRIPLETS_TO_GENERATE = common_config['max_triplets']
     MAX_DOCS_TO_PROCESS = common_config['max_docs']
+    RANDOM_SEED = common_config['random_seed'] # <-- Lấy random seed
 
     # --- Map chunking method name to function ---
     chunking_functions: Dict[str, Callable] = {
@@ -245,13 +378,11 @@ if __name__ == "__main__":
     print(f"\n--- Final Configuration ---")
     print(f"Dataset: {DATASET_NAME}")
     print(f"Processing Split: {split_type}")
-    # <<< SỬA ĐỔI: LOCAL_DATA_PATH có thể cần điều chỉnh nếu bạn muốn nó tách biệt theo dataset >>>
-    # Hiện tại nó đang trỏ đến ./Data/msmarco/msmarco dựa trên default input
-    # Nếu bạn muốn nó chỉ là ./Data/msmarco, hãy sửa default trong get_common_params
-    LOCAL_DATA_PATH = common_config['data_dir'] # Sử dụng trực tiếp data_dir đã nhập
+    LOCAL_DATA_PATH = common_config['data_dir'] 
     print(f"BEIR Data Path: {LOCAL_DATA_PATH}")
-    print(f"Output Directory: {OUTPUT_DIR_METHOD}") # Đường dẫn này giờ đã bao gồm split và số thứ tự
+    print(f"Output Directory: {OUTPUT_DIR_METHOD}") 
     print(f"Chunking Method: {selected_method}")
+    print(f"Include OIE: {'Yes' if INCLUDE_OIE else 'No'}") # Thêm dòng này
     print(f"Embedding Model: {EMBEDDING_MODEL_NAME}")
     print(f"Max Triplets: {MAX_TRIPLETS_TO_GENERATE if MAX_TRIPLETS_TO_GENERATE else 'Unlimited'}")
     print(f"Max Documents to Process: {MAX_DOCS_TO_PROCESS if MAX_DOCS_TO_PROCESS else 'All'}")
@@ -390,7 +521,10 @@ if __name__ == "__main__":
             try:
                 # Mở file chunks output trước
                 with open(CHUNKS_OUTPUT_PATH, 'w', encoding='utf-8') as f_chunks_out, \
-                     concurrent.futures.ProcessPoolExecutor(max_workers=NUM_WORKERS) as executor:
+                     concurrent.futures.ProcessPoolExecutor(
+                        max_workers=NUM_WORKERS,
+                        initializer=init_worker # <<< THÊM INITIALIZER
+                    ) as executor:
 
                     # Sử dụng executor.map
                     results = list(tqdm(executor.map(worker_func_partial, corpus_items),
@@ -399,13 +533,31 @@ if __name__ == "__main__":
 
                     # Xử lý kết quả
                     print("\nProcessing results from workers...")
-                    for doc_id, doc_chunks in tqdm(results, desc="Aggregating results"):
-                        if doc_chunks:
+                    for doc_id, doc_chunks_list in tqdm(results, desc="Aggregating results"): # Đổi tên biến để rõ ràng hơn
+                        if doc_chunks_list: # Kiểm tra xem danh sách chunk có dữ liệu không
                             doc_to_chunk_map[doc_id] = []
-                            for chunk_id, chunk_text in doc_chunks:
-                                chunk_to_doc_map[chunk_id] = doc_id # Sửa lỗi gõ: chunk_to_doc_map
+                            for chunk_tuple in doc_chunks_list: # Lặp qua từng tuple chunk
+                                if len(chunk_tuple) == 3:
+                                    chunk_id, chunk_text, oie_str = chunk_tuple
+                                elif len(chunk_tuple) == 2: # Trường hợp dự phòng nếu có lúc chỉ trả về 2
+                                    chunk_id, chunk_text = chunk_tuple
+                                    oie_str = None
+                                else:
+                                    print(f"Warning: Skipping malformed chunk tuple for doc {doc_id}: {chunk_tuple}")
+                                    continue
+
+                                chunk_to_doc_map[chunk_id] = doc_id
                                 doc_to_chunk_map[doc_id].append(chunk_id)
-                                f_chunks_out.write(json.dumps({'chunk_id': chunk_id, 'text': chunk_text}) + '\n')
+                                
+                                chunk_json_obj = {'chunk_id': chunk_id, 'text': chunk_text}
+                                # Chỉ thêm key 'oie_triples' nếu oie_str có giá trị (không None và không rỗng)
+                                # và nếu INCLUDE_OIE là True cho lần chạy này.
+                                # Tuy nhiên, oie_str đã được quyết định bởi hàm chunking dựa trên params['include_oie']
+                                # nên chỉ cần kiểm tra oie_str là đủ.
+                                if oie_str: 
+                                    chunk_json_obj['oie_triples_str'] = oie_str # Lưu dưới dạng chuỗi đã format
+
+                                f_chunks_out.write(json.dumps(chunk_json_obj) + '\n')
                                 total_chunks_created += 1
                         processed_docs_count += 1
 
@@ -456,19 +608,20 @@ if __name__ == "__main__":
 
     # 3. Load Chunks Data
     print(f"Loading chunks data from {CHUNKS_OUTPUT_PATH}...")
-    chunks_data = {}
+    chunks_data = {} # Lưu trữ {chunk_id: {'text': chunk_text, 'oie_triples_str': oie_string_or_None}}
     try:
         with open(CHUNKS_OUTPUT_PATH, 'r', encoding='utf-8') as f:
-            # Thêm tqdm vào đây nếu file chunks lớn
             for line in tqdm(f, desc="Loading Chunks"):
                 try:
                     chunk_info = json.loads(line)
-                    # Chỉ lưu text nếu cần, hoặc lưu cả object nếu cần thêm thông tin
-                    chunks_data[chunk_info['chunk_id']] = chunk_info['text']
+                    # Lưu cả text và oie_triples_str (nếu có)
+                    chunks_data[chunk_info['chunk_id']] = {
+                        'text': chunk_info.get('text', ''),
+                        'oie_triples_str': chunk_info.get('oie_triples_str') # Sẽ là None nếu không có
+                    }
                 except json.JSONDecodeError as e:
-                    # print(f"Skipping invalid JSON line: {e}") # Bỏ comment nếu muốn xem lỗi JSON
                     continue
-        print(f"Loaded text for {len(chunks_data)} chunks.")
+        print(f"Loaded data for {len(chunks_data)} chunks.")
     except FileNotFoundError:
         print(f"Error: Chunks file not found at {CHUNKS_OUTPUT_PATH}")
         exit()
@@ -509,64 +662,84 @@ if __name__ == "__main__":
         # exit()
 
     # 5. Generate Triplets
-    # <<< SỬA ĐỔI: Sử dụng OUTPUT_TRIPLETS_PATH >>>
-    print(f"Generating triplets and saving to {OUTPUT_TRIPLETS_PATH}...")
-    triplets_count = 0
+    print(f"Generating all possible triplets...")
+    
+    all_generated_triplets = [] # <-- THU THẬP TẤT CẢ TRIPLETS VÀO ĐÂY
+    
+    query_ids_for_triplet_generation = list(queries.keys())
+    random.seed(RANDOM_SEED) # Seed cho việc shuffle query_ids nếu muốn, hoặc cho các random khác
+    random.shuffle(query_ids_for_triplet_generation)
+
+    for qid in tqdm(query_ids_for_triplet_generation, desc=f"Processing Queries for Triplets ({split_type})"):
+        if qid not in queries or qid not in query_positive_chunks:
+            continue
+
+        query_text = clean_text(queries[qid])
+        positive_chunk_ids_for_query = query_positive_chunks[qid]
+
+        for positive_chunk_id in positive_chunk_ids_for_query:
+            positive_chunk_content = chunks_data.get(positive_chunk_id)
+            if not positive_chunk_content or not positive_chunk_content.get('text'): continue
+            
+            # Lấy text và oie_str cho positive chunk
+            positive_text_only = positive_chunk_content['text']
+            positive_oie_str = positive_chunk_content.get('oie_triples_str', '') # Mặc định là chuỗi rỗng nếu không có
+            
+            # Nối OIE vào text nếu có (đảm bảo có khoảng trắng nếu cả hai đều tồn tại)
+            # Chuỗi OIE đã có dạng " [OIE_TRIPLES] ... [/OIE_TRIPLES]" hoặc rỗng
+            final_positive_chunk_text_with_oie = positive_text_only.strip() + (f" {positive_oie_str.strip()}" if positive_oie_str and positive_oie_str.strip() else "")
+
+
+            negative_chunk_id = None
+            potential_negative_pool = [cid for cid in all_chunk_ids if cid not in positive_chunk_ids_for_query]
+            
+            if not potential_negative_pool: 
+                continue
+
+            negative_chunk_id = random.choice(potential_negative_pool)
+
+            if negative_chunk_id:
+                negative_chunk_content = chunks_data.get(negative_chunk_id)
+                if negative_chunk_content and negative_chunk_content.get('text'):
+                    negative_text_only = negative_chunk_content['text']
+                    negative_oie_str = negative_chunk_content.get('oie_triples_str', '')
+
+                    final_negative_chunk_text_with_oie = negative_text_only.strip() + (f" {negative_oie_str.strip()}" if negative_oie_str and negative_oie_str.strip() else "")
+                    
+                    triplet_line = f"{query_text}\t{clean_text(final_positive_chunk_text_with_oie)}\t{clean_text(final_negative_chunk_text_with_oie)}\n"
+                    all_generated_triplets.append(triplet_line)
+
+    print(f"\nGenerated a total of {len(all_generated_triplets)} possible triplets.")
+
+    # Lấy mẫu ngẫu nhiên nếu cần
+    triplets_to_write = []
+    if MAX_TRIPLETS_TO_GENERATE is not None and len(all_generated_triplets) > MAX_TRIPLETS_TO_GENERATE:
+        print(f"Sampling {MAX_TRIPLETS_TO_GENERATE} triplets randomly using seed {RANDOM_SEED}...")
+        random.seed(RANDOM_SEED) # Đặt lại seed ngay trước khi sampling để đảm bảo tính nhất quán
+        triplets_to_write = random.sample(all_generated_triplets, MAX_TRIPLETS_TO_GENERATE)
+    elif len(all_generated_triplets) > 0 : # Nếu không có giới hạn, hoặc giới hạn không bị vượt quá
+        triplets_to_write = all_generated_triplets
+        if MAX_TRIPLETS_TO_GENERATE is not None:
+             print(f"Number of generated triplets ({len(all_generated_triplets)}) is within or equal to the limit ({MAX_TRIPLETS_TO_GENERATE}). Using all generated triplets.")
+        else:
+             print("No limit set for triplets. Using all generated triplets.")
+    else:
+        print("No triplets were generated. Output file will be empty.")
+
+
+    # Ghi các triplets đã chọn vào file
+    print(f"Writing {len(triplets_to_write)} triplets to {OUTPUT_TRIPLETS_PATH}...")
     try:
-        # <<< SỬA ĐỔI: Sử dụng OUTPUT_TRIPLETS_PATH >>>
         with open(OUTPUT_TRIPLETS_PATH, 'w', encoding='utf-8') as f_out:
-            query_ids = list(queries.keys())
-            random.shuffle(query_ids)
-
-            for qid in tqdm(query_ids, desc=f"Generating Triplets ({split_type})"):
-                # Kiểm tra xem qid có query_text, có trong mapping và có chunk dương không
-                if qid not in queries or qid not in query_positive_chunks: # Đã kiểm tra set rỗng ở bước 4
-                    continue
-
-                query_text = clean_text(queries[qid])
-                positive_chunk_ids_for_query = query_positive_chunks[qid]
-
-                # Lặp qua từng chunk dương cho query này
-                for positive_chunk_id in positive_chunk_ids_for_query:
-                    positive_chunk_text = chunks_data.get(positive_chunk_id)
-                    if not positive_chunk_text: continue # Bỏ qua nếu không tìm thấy text (dù không nên xảy ra)
-
-                    # Lấy mẫu negative chunk
-                    negative_chunk_id = None
-                    attempts = 0
-                    max_attempts = len(all_chunk_ids) # Giới hạn số lần thử để tránh vòng lặp vô hạn
-                    while attempts < max_attempts:
-                        potential_negative_id = random.choice(all_chunk_ids)
-                        # Đảm bảo negative không nằm trong tập positive của query HIỆN TẠI
-                        if potential_negative_id not in positive_chunk_ids_for_query:
-                            negative_chunk_id = potential_negative_id
-                            break
-                        attempts += 1
-
-                    # Nếu tìm được negative hợp lệ
-                    if negative_chunk_id:
-                        negative_chunk_text = chunks_data.get(negative_chunk_id)
-                        if negative_chunk_text: # Đảm bảo negative chunk có text
-                            # <<< SỬA ĐỔI: Ghi vào f_out >>>
-                            f_out.write(f"{query_text}\t{clean_text(positive_chunk_text)}\t{clean_text(negative_chunk_text)}\n")
-                            triplets_count += 1
-                            # Kiểm tra giới hạn triplets
-                            if MAX_TRIPLETS_TO_GENERATE is not None and triplets_count >= MAX_TRIPLETS_TO_GENERATE:
-                                print(f"\nReached limit of {MAX_TRIPLETS_TO_GENERATE} triplets.")
-                                raise StopIteration # Dùng exception để thoát khỏi các vòng lặp lồng nhau
-
-                # Kiểm tra lại giới hạn sau khi xử lý hết positive chunks cho 1 query
-                if MAX_TRIPLETS_TO_GENERATE is not None and triplets_count >= MAX_TRIPLETS_TO_GENERATE:
-                    break # Thoát vòng lặp duyệt query
-
-    except StopIteration:
-        pass
+            for triplet_line in tqdm(triplets_to_write, desc="Writing Triplets to File"):
+                f_out.write(triplet_line)
     except Exception as e:
-        print(f"An error occurred generating triplets: {e}")
+        print(f"An error occurred writing triplets to file: {e}")
         import traceback
         traceback.print_exc()
 
-    print(f"Finished generating {triplets_count} triplets.")
+    triplets_count = len(triplets_to_write) # Cập nhật số lượng triplets thực tế đã ghi
+    print(f"Finished generating and writing {triplets_count} triplets.")
     # <<< SỬA ĐỔI: Sử dụng OUTPUT_TRIPLETS_PATH >>>
     print(f"Output triplets saved to: {OUTPUT_TRIPLETS_PATH}")
     print(f"\n--- Steps 1, 2 and 3 (Chunking: {selected_method}, Triplet Generation for Split: {split_type}) Completed ---")

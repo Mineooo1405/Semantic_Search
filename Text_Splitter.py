@@ -4,12 +4,13 @@ import nltk
 import time
 import json
 import pandas as pd
-from typing import List, Dict, Union, Optional, Callable, Tuple
+from typing import List, Dict, Union, Optional, Callable, Tuple # Sửa lại type hint cho hàm cuối
 from dotenv import load_dotenv
 from Tool.Sentence_Detector import extract_and_simplify_sentences
 from Tool.Database import connect_to_db
-from Tool.OIE import extract_triples_for_search
+# from Tool.OIE import extract_triples_for_search
 import hashlib
+import traceback # Thêm import này
 
 try:
     nltk.data.find('tokenizers/punkt')
@@ -19,20 +20,8 @@ except LookupError:
 load_dotenv()
 
 def to_sentences(passage):
-    """
-    Tách đoạn văn thành các câu riêng biệt tối ưu cho OIE
-    
-    Args:
-        passage: Đoạn văn bản cần tách câu
-        
-    Returns:
-        list: Danh sách các câu đã được chia nhỏ
-    """
-    # Lấy ra câu đã chia nhỏ (phần tử thứ 2 của tuple)
     sub_sentences = extract_and_simplify_sentences(passage, simplify=True)
     return sub_sentences
-
-
 
 def calculate_chunk_stats(chunks):
     stats = {
@@ -44,101 +33,85 @@ def calculate_chunk_stats(chunks):
     return stats
 
 def split_by_sentence(text, chunk_size=1000, chunk_overlap=200):
-    """
-    Chia văn bản thành các đoạn dựa trên ranh giới câu
-    
-    Args:
-        text: Văn bản cần chia
-        chunk_size: Kích thước tối đa của mỗi chunk (ký tự)
-        chunk_overlap: Số câu chồng lấp giữa các chunk liên tiếp
-        
-    Returns:
-        list: Danh sách các chunk văn bản
-        list: Danh sách các câu gốc
-    """
-    # Tách câu
     sentences = to_sentences(text)
-    print(f"[INFO] Đã tách thành {len(sentences)} câu")
+    # Bỏ print không cần thiết ở đây, vì nó có thể gây nhiễu log khi chạy song song
+    # print(f"[INFO] Đã tách thành {len(sentences)} câu") 
     
     if not sentences:
-        return [], []
+        return [], [], []
     
     if len(text) <= chunk_size:
-        return [text], sentences
+        sentence_indices = list(range(len(sentences)))
+        return [text], sentences, [sentence_indices]
     
-    # Tính kích thước của các câu
     sentence_lengths = [len(s) for s in sentences]
-    
     chunks = []
-    current_chunk = []
+    current_chunk_sentences = []
     current_size = 0
-    
-    # Danh sách để theo dõi các câu thuộc từng chunk
     sentence_groups = []
-    current_group = []
+    current_group_indices = []
     
     for i, sentence in enumerate(sentences):
         sentence_len = sentence_lengths[i]
         
-        # Nếu câu hiện tại quá dài, chia nhỏ câu đó
         if sentence_len > chunk_size:
-            # Xử lý chunk hiện tại trước
-            if current_chunk:
-                chunks.append(' '.join(current_chunk))
-                sentence_groups.append(current_group)
-                current_chunk = []
-                current_group = []
+            if current_chunk_sentences:
+                chunks.append(' '.join(current_chunk_sentences))
+                sentence_groups.append(list(current_group_indices)) # Tạo copy
+                current_chunk_sentences = []
+                current_group_indices = []
                 current_size = 0
-            
-            # Đối với câu dài, tạo chunk riêng và ghi nhận chỉ có một câu
             chunks.append(sentence)
             sentence_groups.append([i])
             continue
         
-        # Nếu thêm câu hiện tại vào chunk sẽ vượt quá kích thước tối đa
-        if current_size + sentence_len + 1 > chunk_size and current_chunk:  # +1 cho khoảng trắng
-            chunks.append(' '.join(current_chunk))
-            sentence_groups.append(current_group)
+        if current_size + sentence_len + (1 if current_chunk_sentences else 0) > chunk_size and current_chunk_sentences:
+            chunks.append(' '.join(current_chunk_sentences))
+            sentence_groups.append(list(current_group_indices)) # Tạo copy
             
-            # Tính toán số câu cần giữ lại cho overlap
-            if chunk_overlap > 0:
-                # Số câu chồng lấp dựa trên kích thước
-                overlap_size = 0
-                overlap_sentences = []
-                overlap_indices = []
+            if chunk_overlap > 0 and len(current_chunk_sentences) > 1:
+                overlap_char_count = 0
+                temp_overlap_sentences = []
+                temp_overlap_indices = []
                 
-                # Đảo ngược để lấy từ cuối lên
-                for idx, s in reversed(list(zip(current_group, current_chunk))):
+                for sent_idx_in_group, original_sent_idx in reversed(list(enumerate(current_group_indices))):
+                    s = current_chunk_sentences[sent_idx_in_group]
                     s_len = len(s)
-                    if overlap_size + s_len > chunk_overlap:
+                    if overlap_char_count + s_len + (1 if temp_overlap_sentences else 0) > chunk_overlap and temp_overlap_sentences:
                         break
-                    overlap_sentences.insert(0, s)
-                    overlap_indices.insert(0, idx)
-                    overlap_size += s_len + 1  # +1 cho khoảng trắng
+                    temp_overlap_sentences.insert(0, s)
+                    temp_overlap_indices.insert(0, original_sent_idx)
+                    overlap_char_count += s_len + (1 if len(temp_overlap_sentences) > 1 else 0)
                 
-                current_chunk = overlap_sentences
-                current_group = overlap_indices
-                current_size = overlap_size
+                if temp_overlap_sentences and temp_overlap_sentences != current_chunk_sentences: # Đảm bảo temp_overlap_sentences không rỗng
+                    current_chunk_sentences = temp_overlap_sentences
+                    current_group_indices = temp_overlap_indices
+                    current_size = overlap_char_count - (1 if overlap_char_count > 0 and len(current_chunk_sentences) > 1 else 0)
+                else:
+                    current_chunk_sentences = []
+                    current_group_indices = []
+                    current_size = 0
             else:
-                current_chunk = []
-                current_group = []
+                current_chunk_sentences = []
+                current_group_indices = []
                 current_size = 0
         
-        # Thêm câu hiện tại vào chunk
-        current_chunk.append(sentence)
-        current_group.append(i)
-        current_size += sentence_len + 1  # +1 cho khoảng trắng
+        current_chunk_sentences.append(sentence)
+        current_group_indices.append(i)
+        current_size += sentence_len + (1 if len(current_chunk_sentences) > 1 else 0)
     
-    # Thêm chunk cuối cùng nếu có
-    if current_chunk:
-        chunks.append(' '.join(current_chunk))
-        sentence_groups.append(current_group)
+    if current_chunk_sentences:
+        chunks.append(' '.join(current_chunk_sentences))
+        sentence_groups.append(list(current_group_indices)) # Tạo copy
     
-    # Hiển thị thống kê
-    stats = calculate_chunk_stats(chunks)
-    print(f"[INFO] Chia theo câu: tạo {stats['count']} chunk")
-    print(f"[INFO] Độ dài trung bình: {stats['avg_length']:.1f} ký tự")
-    
+    # Bỏ print không cần thiết ở đây
+    # stats = calculate_chunk_stats(chunks)
+    # if stats['count'] > 0:
+    #     print(f"[INFO] Chia theo câu: tạo {stats['count']} chunk")
+    #     print(f"[INFO] Độ dài trung bình: {stats['avg_length']:.1f} ký tự")
+    # else:
+    #     print(f"[INFO] Chia theo câu: không tạo được chunk nào.")
+        
     return chunks, sentences, sentence_groups
 
 def chunk_passage_text_splitter(
@@ -146,34 +119,40 @@ def chunk_passage_text_splitter(
     passage_text: str,
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
-    **kwargs # Bắt các tham số không dùng đến
-) -> List[Tuple[str, str]]:
+    include_oie: bool = False,
+    **kwargs 
+) -> List[List[Tuple[str, str, Optional[str]]]]: # <<< SỬA ĐỔI TYPE HINT
     """
     Chunk một passage sử dụng logic Text Splitter (split_by_sentence).
-
-    Args:
-        doc_id (str): ID của document gốc.
-        passage_text (str): Nội dung của passage.
-        chunk_size (int): Kích thước chunk tối đa (ký tự).
-        chunk_overlap (int): Số ký tự chồng lấp (ước lượng qua câu).
-
-    Returns:
-        List[Tuple[str, str]]: Danh sách các tuple (chunk_id, chunk_text).
+    Trả về một list chứa một list các chunk tuples.
     """
-    chunks_result = []
+    actual_chunks_result: List[Tuple[str, str, Optional[str]]] = []
     try:
-        # a. Chia văn bản thành các chunk dựa trên câu
-        # Hàm split_by_sentence trả về (chunks, sentences, sentence_groups)
-        # Chúng ta chỉ cần chunks ở đây
-        chunks, _, _ = split_by_sentence(passage_text, chunk_size, chunk_overlap)
+        chunk_texts, _, _ = split_by_sentence(passage_text, chunk_size, chunk_overlap)
 
-        # b. Tạo chunk_id và định dạng kết quả
-        for chunk_idx, chunk_text in enumerate(chunks):
-            if chunk_text:
-                chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:10]
-                chunk_id = f"{doc_id}_{chunk_hash}_{chunk_idx}" # Thêm chunk_idx để tránh trùng hash
-                chunks_result.append((chunk_id, chunk_text))
+        for chunk_idx, chunk_text_content in enumerate(chunk_texts):
+            if chunk_text_content:
+                chunk_hash = hashlib.md5(chunk_text_content.encode('utf-8')).hexdigest()[:10]
+                chunk_id = f"{doc_id}_{chunk_hash}_{chunk_idx}"
+                
+                oie_triples_str = None
+                if include_oie:
+                    # Nếu bạn có logic OIE cho TextSplitter, hãy thêm vào đây.
+                    # Ví dụ:
+                    # from Tool.OIE import extract_triples # Đảm bảo import đúng
+                    # oie_triples_str = extract_triples(chunk_text_content, doc_id, chunk_id) 
+                    pass 
+
+                actual_chunks_result.append((chunk_id, chunk_text_content, oie_triples_str))
 
     except Exception as e:
-        print(f"Error chunking doc {doc_id} with Text Splitter: {e}")
-    return chunks_result
+        # print(f"Error chunking doc {doc_id} with Text Splitter: {e}") # Log này có thể đã có ở tầng cao hơn
+        # traceback.print_exc()
+        # Trả về một cấu trúc rỗng nhưng vẫn đúng định dạng để không làm hỏng quá trình unpack
+        return [[]] # Trả về list chứa một list rỗng
+
+    # Luôn trả về một list chứa list các chunk (actual_chunks_result)
+    # Nếu actual_chunks_result rỗng, nó sẽ là [[]]
+    # Nếu actual_chunks_result có chunk, nó sẽ là [[(chunk1_data), (chunk2_data)]]
+    return [actual_chunks_result] # <<< SỬA ĐỔI QUAN TRỌNG
+

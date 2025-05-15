@@ -1,8 +1,14 @@
 import os
+import hashlib
 from dotenv import load_dotenv
 from openie import StanfordOpenIE
 import re
-corenlp_path = r'D:/path/to/your/stanford-corenlp-4.5.6' # Ví dụ đường dẫn
+import json
+import diskcache
+
+OIE_CACHE = diskcache.Cache('./oie_cache')  # Initialize cache in a directory
+
+corenlp_path = r'D:/SemanticSearch/CoreNLP' # Ví dụ đường dẫn
 if 'CORENLP_HOME' not in os.environ and os.path.exists(corenlp_path):
     os.environ['CORENLP_HOME'] = corenlp_path
     print(f"[INFO] Đã đặt CORENLP_HOME='{corenlp_path}'")
@@ -10,66 +16,125 @@ elif 'CORENLP_HOME' not in os.environ:
     print("[WARNING] Biến môi trường CORENLP_HOME chưa được đặt và đường dẫn mặc định không tồn tại. OpenIE có thể không hoạt động.")
 load_dotenv()
 
+_CLIENT_STANDARD = None
+_CLIENT_ENHANCED = None
+
+STANDARD_PROPERTIES = {
+    'annotators': 'tokenize,pos,lemma,depparse,natlog,coref,openie',
+    'openie.affinity_probability_cap': 0.8,
+    'openie.triple.strict': False,
+    'openie.max_entailments_per_clause': 3,
+    'openie.resolve_coref': True,
+    'timeout': 120000 # 2 phút
+}
+
+ENHANCED_PROPERTIES = {
+    'annotators': 'tokenize,pos,lemma,depparse,natlog,coref,openie',
+    'outputFormat': 'json', # Đảm bảo output là JSON để parse
+    'openie.affinity_probability_cap': 0.5,
+    'openie.triple.strict': False,
+    'openie.max_entailments_per_clause': 5,
+    'openie.resolve_coref': True,
+    'openie.min_relation_length': 1,
+    'timeout': 150000 # 2.5 phút
+}
+
+def get_stanford_oie_client(properties, enhanced_setting: bool):
+    global _CLIENT_STANDARD, _CLIENT_ENHANCED
+    
+    if 'CORENLP_HOME' not in os.environ:
+        corenlp_path_default = r'D:/SemanticSearch/CoreNLP' # Cập nhật đường dẫn này
+        if os.path.exists(corenlp_path_default):
+            os.environ['CORENLP_HOME'] = corenlp_path_default
+            print(f"[INFO] Đã đặt CORENLP_HOME='{corenlp_path_default}'")
+        else:
+            print("[ERROR] CORENLP_HOME chưa được đặt và đường dẫn mặc định không tồn tại. StanfordOpenIE sẽ không hoạt động.")
+            return None
+
+    client_to_use = _CLIENT_ENHANCED if enhanced_setting else _CLIENT_STANDARD
+    props_to_use = properties if properties is not None else (ENHANCED_PROPERTIES if enhanced_setting else STANDARD_PROPERTIES)
+
+    if client_to_use is None:
+        try:
+            print(f"[INFO] Khởi tạo StanfordOpenIE client (enhanced={enhanced_setting})...")
+            client_to_use = StanfordOpenIE(properties=props_to_use)
+            if enhanced_setting:
+                _CLIENT_ENHANCED = client_to_use
+            else:
+                _CLIENT_STANDARD = client_to_use
+            print("[INFO] StanfordOpenIE client khởi tạo thành công.")
+        except Exception as e:
+            print(f"[ERROR] Lỗi khởi tạo StanfordOpenIE client (enhanced={enhanced_setting}): {e}")
+            return None
+    return client_to_use
+
 def extract_triples(text, properties=None, enhanced=False):
     """
     Trích xuất quan hệ (subject, relation, object) từ văn bản sử dụng Stanford OpenIE
-    
-    Args:
-        text: Văn bản cần trích xuất quan hệ
-        properties: Tùy chọn cấu hình cho OpenIE
-        enhanced: Sử dụng cấu hình nâng cao cho tìm kiếm (tăng độ bao phủ)
-        
-    Returns:
-        list: Danh sách các triple {subject, relation, object}
+    và sử dụng caching.
     """
-    # Cấu hình mặc định tiêu chuẩn
-    standard_properties = {
-        'annotators': 'tokenize,pos,lemma,depparse,natlog,coref,openie',
-        'openie.affinity_probability_cap': 0.8,
-        'openie.triple.strict': False,
-        'openie.max_entailments_per_clause': 3,
-        'openie.resolve_coref': True,
-        'timeout': 120000
-    }
+    # --- Start Caching Logic ---
+    cache_key_parts = [text]
+    if properties:
+        cache_key_parts.append(json.dumps(properties, sort_keys=True)) # Đảm bảo thứ tự key nhất quán
+    cache_key_parts.append(str(enhanced))
+    cache_key = hashlib.md5("||".join(cache_key_parts).encode('utf-8')).hexdigest()
+
+    cached_result = OIE_CACHE.get(cache_key)
+    if cached_result is not None:
+        # print(f"[DEBUG] OIE Cache hit for key: {cache_key}")
+        return cached_result
+    # --- End Caching Logic ---
+
+    client = get_stanford_oie_client(properties, enhanced)
+    if not client:
+        return []
     
-    # Cấu hình nâng cao cho tìm kiếm (tăng độ bao phủ)
-    enhanced_properties = {
-        'annotators': 'tokenize,pos,lemma,depparse,natlog,coref,openie',
-        'outputFormat': 'json',
-        'openie.affinity_probability_cap': 0.5,  # Tăng độ phủ
-        'openie.triple.strict': False,           # Chấp nhận cấu trúc linh hoạt 
-        'openie.max_entailments_per_clause': 5,  # Tăng số quan hệ trích xuất
-        'openie.resolve_coref': True,            # Bật xử lý đồng tham chiếu
-        'openie.min_relation_length': 1,         # Chấp nhận quan hệ ngắn
-        'timeout': 150000                        # Tăng timeout
-    }
-    
-    # Sử dụng cấu hình được cung cấp, hoặc chọn theo tham số enhanced
-    if properties is None:
-        properties = enhanced_properties if enhanced else standard_properties
-    
-    # Khởi tạo client
-    client = StanfordOpenIE(properties=properties)
-    
+    current_properties = ENHANCED_PROPERTIES if enhanced else STANDARD_PROPERTIES
+    if properties: 
+         current_properties = properties
+
+    triples = [] # Di chuyển khởi tạo ra ngoài try-except để return nếu có lỗi
     try:
-        with client:
-            direct_props = {
-                'annotators': 'tokenize,pos,lemma,depparse,natlog,coref,openie',
-                'outputFormat': 'json'
-            }
-            result = client.client.annotate(text, properties=direct_props)
-            triples = []
-            for sentence in result['sentences']:
-                if 'openie' in sentence:
-                    for triple in sentence['openie']:
+        final_props_for_annotate = current_properties.copy()
+        final_props_for_annotate['outputFormat'] = 'json'
+
+        annotated_text = client.client.annotate(text, properties=final_props_for_annotate)
+        
+        if isinstance(annotated_text, str):
+            try:
+                result_json = json.loads(annotated_text)
+            except json.JSONDecodeError as je:
+                print(f"[ERROR] Lỗi parse JSON từ OpenIE: {je}")
+                print(f"[DEBUG] Raw output: {annotated_text[:500]}")
+                OIE_CACHE.set(cache_key, []) # Cache kết quả rỗng nếu lỗi parse
+                return []
+        elif isinstance(annotated_text, dict):
+             result_json = annotated_text
+        else:
+            print(f"[ERROR] Định dạng kết quả không mong muốn từ OpenIE: {type(annotated_text)}")
+            OIE_CACHE.set(cache_key, []) # Cache kết quả rỗng
+            return []
+
+        if 'sentences' in result_json:
+            for sentence_data in result_json['sentences']:
+                if 'openie' in sentence_data:
+                    for triple_data in sentence_data['openie']: # Đổi tên biến để tránh nhầm lẫn
                         triples.append({
-                            'subject': triple['subject'],
-                            'relation': triple['relation'],
-                            'object': triple['object']
+                            'subject': triple_data['subject'],
+                            'relation': triple_data['relation'],
+                            'object': triple_data['object']
                         })
-            return triples
+        else:
+            print("[WARNING] Không tìm thấy key 'sentences' trong kết quả OpenIE.")
+        
+        OIE_CACHE.set(cache_key, triples) # Lưu kết quả thành công vào cache
+        return triples
     except Exception as e:
         print(f"[ERROR] Lỗi khi trích xuất quan hệ: {e}")
+        import traceback
+        traceback.print_exc()
+        OIE_CACHE.set(cache_key, []) # Cache kết quả rỗng nếu có lỗi nghiêm trọng
         return []
 
 def extract_triples_for_search(text, properties=None):
@@ -321,3 +386,24 @@ def generate_graph(text, output_path="graph.png", properties=None):
     except Exception as e:
         print(f"[ERROR] Lỗi khi tạo biểu đồ: {e}")
         return False
+
+def close_oie_clients():
+    """Đóng các client OpenIE nếu chúng đã được mở."""
+    global _CLIENT_STANDARD, _CLIENT_ENHANCED
+    if _CLIENT_STANDARD:
+        try:
+            _CLIENT_STANDARD.stop() # Hoặc .close(), tùy thuộc vào API của thư viện
+            print("[INFO] StanfordOpenIE standard client stopped.")
+        except Exception as e:
+            print(f"[ERROR] Lỗi khi đóng standard client: {e}")
+        _CLIENT_STANDARD = None
+    if _CLIENT_ENHANCED:
+        try:
+            _CLIENT_ENHANCED.stop() # Hoặc .close()
+            print("[INFO] StanfordOpenIE enhanced client stopped.")
+        except Exception as e:
+            print(f"[ERROR] Lỗi khi đóng enhanced client: {e}")
+        _CLIENT_ENHANCED = None
+
+# Nên gọi close_oie_clients() khi ứng dụng của bạn kết thúc
+# Ví dụ: import atexit; atexit.register(close_oie_clients)

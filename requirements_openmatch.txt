@@ -1,0 +1,28 @@
+# --- Core Libraries ---
+torch>=1.10.0,<2.0.0 # PyTorch - OpenMatch thường tương thích tốt với các bản 1.x
+transformers>=4.20.0,<4.30.0 # Hugging Face Transformers
+pandas>=1.3.0
+numpy>=1.20.0
+tqdm>=4.60.0
+scikit-learn>=1.0.0
+scipy>=1.7.0
+# pytrec_eval>=0.5 # Thường dùng để đánh giá
+
+# --- Tokenizers & Text Processing ---
+sentencepiece>=0.1.90 # Thường dùng với T5 và một số mô hình khác
+nltk>=3.6.0
+
+# --- For Data Handling & Checkpoints (Optional, but good to have) ---
+# dill>=0.3.0 # Nếu cần lưu/tải các đối tượng Python phức tạp
+# tensorboard>=2.8.0 # Để theo dõi quá trình huấn luyện
+
+# --- LƯU Ý QUAN TRỌNG ---
+# 1. OpenMatch: Thư viện này thường được cài đặt bằng cách clone repository
+#    từ GitHub và chạy `pip install .` trong thư mục OpenMatch.
+#    Kiểm tra trang GitHub của OpenMatch để có hướng dẫn cài đặt mới nhất.
+#
+# 2. PyTorch & CUDA: Nếu bạn dùng GPU, hãy cài đặt PyTorch với phiên bản CUDA phù hợp
+#    theo hướng dẫn chính thức từ trang chủ PyTorch: https://pytorch.org/get-started/locally/
+#    Lệnh pip trong file này có thể cài bản CPU-only của PyTorch.
+#
+# 3. Phiên bản Python: Khuyến nghị Python 3.8, 3.9, hoặc 3.10. 

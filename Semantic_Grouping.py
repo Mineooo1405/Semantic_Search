@@ -115,7 +115,7 @@ def embed_sentences_in_batches(sentences: List[str], model_name: str, batch_size
             print(f"    Embedding batch {batch_num}/{num_batches}...", end='\r')
             batch = sentences[i:i+batch_size]
             # Gọi hàm nhúng gốc, truyền model_name nếu cần
-            batch_embeddings = embed_text_list(batch, model_name=model_name) # Pass model_name
+            batch_embeddings = embed_text_list(batch, model_name_or_path=model_name) # Pass model_name
             if batch_embeddings is not None:
                  # Chuyển đổi sang numpy array nếu cần và giải phóng tensor gốc (nếu có)
                  if hasattr(batch_embeddings, 'cpu'): # Check if it's a PyTorch tensor

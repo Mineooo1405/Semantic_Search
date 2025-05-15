@@ -1,0 +1,34 @@
+# Acest fișier este pentru configurarea unui mediu Python pentru a rula MatchZoo 2.2.
+# Se concentrează pe compatibilitatea versiunilor.
+
+# --- Core MatchZoo Dependencies ---
+keras==2.3.0
+tensorflow==2.3.0 # Fixat la o versiune compatibilă cu Keras 2.3.0
+
+# Numpy: Keras 2.3.0 și TF 2.3.0 funcționează bine cu Numpy < 1.20
+numpy<1.20,>=1.18.0 # Permite o anumită flexibilitate, dar evită versiunile >=1.20
+
+pandas==0.24.2 # Din cerințele originale ale MZ 2.2
+nltk>=3.2.3
+dill>=0.2.7.1
+
+# h5py: Versiunile < 3.0.0 sunt mai sigure pentru TF/Keras mai vechi
+h5py>=2.8.0,<3.0.0
+
+tqdm>=4.23.4
+tabulate>=0.8.2
+hyperopt>=0.1.1     # Necesar dacă modelul sau preprocesorul utilizează reglarea hiperparametrilor
+networkx>=2.1       # Poate fi necesar pentru anumite vizualizări sau preprocesări
+
+# --- Opțional, dar bun pentru scriptul de evaluare ---
+# scikit-learn # Dacă scriptul de evaluare utilizează metrici sklearn pentru sarcini de clasificare
+
+# --- Comentarii ---
+# 1. Creați un mediu virtual nou (de ex., Python 3.7 sau 3.8 recomandat).
+#    python -m venv env_mz22
+#    source env_mz22/bin/activate  (Linux/macOS)
+#    .\env_mz22\Scripts\activate (Windows)
+# 2. Instalați pachetele folosind acest fișier:
+#    pip install -r requirements_for_mz22_eval.txt
+# 3. Instalați MatchZoo 2.2 din sursă (după ce dependențele de mai sus sunt instalate):
+#    pip install -e /calea/catre/folderul/MatchZoo-2.2 

@@ -6,7 +6,9 @@ venv*/
 ENV*/
 .myenv/
 *.env
-
+*.venv
+*.env_test
+*.venv_openmatch
 # Ignore model checkpoints, weights, and serialized models
 *.h5
 *.pt
@@ -65,3 +67,7 @@ Thumbs.db
 
 # Ignore VSCode settings
 .vscode/
+vcpkg/
+MatchZoo-2.2/
+oie_cache/
+open-match/

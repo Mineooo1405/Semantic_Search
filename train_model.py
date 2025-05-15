@@ -1,42 +1,31 @@
 import matchzoo as mz
-import torch
 import os
 import pandas as pd
 import sys
-import dill # Import dill for saving preprocessor
-import math
+import dill
 from datetime import datetime
-import numpy as np # Needed for embedding matrix
-from matchzoo import data_generator  # Import the entire dataloader module
-from keras.layers import Layer # Corrected import path for Keras 2.x
-# The pytorch-specific import will be handled through try/except blocks later
+import numpy as np
 import keras
-# Cũng kiểm tra module gốc
+import shutil
+import torch
+from torch.utils.data import DataLoader, Dataset
+import json
 
 def load_glove_embeddings(path, term_index, embedding_dim):
-    """
-    Loads GloVe embeddings from a file and creates an embedding matrix.
-    """
     embeddings_index = {}
     print(f"Reading GloVe file from: {path}")
     try:
         with open(path, 'r', encoding='utf-8') as f:
             for line in f:
                 values = line.split()
-                # Ensure the line can be split correctly
                 if len(values) < embedding_dim + 1:
-                    # print(f"Skipping malformed line: {line.strip()}") # Optional: Debugging
                     continue
                 word = values[0]
                 try:
                     coefs = np.asarray(values[1:], dtype='float32')
-                    # Check dimension consistency
                     if len(coefs) == embedding_dim:
                         embeddings_index[word] = coefs
-                    # else: # Optional: Debugging
-                        # print(f"Skipping word '{word}' with unexpected dimension {len(coefs)}")
                 except ValueError:
-                    # print(f"Skipping word '{word}' due to non-float value") # Optional: Debugging
                     continue
     except FileNotFoundError:
         print(f"Error: GloVe file not found at {path}")
@@ -45,502 +34,478 @@ def load_glove_embeddings(path, term_index, embedding_dim):
         print(f"Error reading GloVe file: {e}")
         sys.exit(1)
 
-    print(f'Found {len(embeddings_index)} word vectors in GloVe file.')
-
-    # Prepare embedding matrix
-    # Index 0 is usually reserved for padding/OOV in MatchZoo's VocabUnit
-    num_tokens = len(term_index) + 1 # Add 1 for OOV token (index 0)
+    num_tokens = len(term_index) + 1
     embedding_matrix = np.zeros((num_tokens, embedding_dim))
     hits = 0
     misses = 0
-
-    # term_index maps words to indices > 0
     for word, i in term_index.items():
-        if i >= num_tokens: # Sanity check
-             print(f"Warning: Index {i} for word '{word}' is out of bounds for matrix size {num_tokens}")
+        if i >= num_tokens:
              continue
         embedding_vector = embeddings_index.get(word)
         if embedding_vector is not None:
-            # Words not found in embedding index will be all-zeros.
             embedding_matrix[i] = embedding_vector
             hits += 1
         else:
             misses += 1
-            # embedding_matrix[i] remains zeros
-
     print(f"Built embedding matrix: {hits} words found, {misses} words missing.")
     return embedding_matrix
 
-# --- Helper function to get and validate TRAIN_DATA_PATH ---
+def select_model():
+    available_models = {
+        "1": "KNRM",
+        "2": "MatchLSTM",
+    }
+    print("\n--- Select Model for Training ---")
+    for key, name in available_models.items():
+        print(f"{key}. {name}")
+
+    while True:
+        choice = input(f"Enter the number of the model you want to train (e.g., 1 for KNRM): ").strip()
+        if choice in available_models:
+            selected_model_name = available_models[choice]
+            print(f"You selected: {selected_model_name}")
+            return selected_model_name
+        else:
+            print("Invalid choice. Please select a number from the list.")
+
 def get_validated_train_data_path():
-    """
-    Prompts the user for the training data path and validates it for chunk type.
-    Returns the validated path and the determined chunk type.
-    """
     default_train_path = "D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_triplets.tsv"
     allowed_chunk_keywords = {
         "semantic-grouping": "grouping",
         "semantic-splitter": "splitter",
-        "text-splitter": "text" # Assuming 'text-splitter' in path means 'length' type
+        "text-splitter": "text"
     }
-    
     while True:
-        print("\n--- Input Training Data Path ---")
         user_path = input(f"Enter the full path to your training triplets file (e.g., .tsv)\n(default: {default_train_path}): ").strip()
         if not user_path:
             user_path = default_train_path
+        
+        user_path = os.path.normpath(user_path)
 
         if not os.path.exists(user_path) or not os.path.isfile(user_path):
             print(f"Error: File not found or not a file at '{user_path}'. Please try again.")
             continue
-
         try:
-            # Expect path like .../dataset_chunkmethod/split_run_num/triplets_file.tsv
-            # The directory containing chunk method info is 3 levels up from the file
-            method_indicator_from_path = user_path.split(os.sep)[-3].lower()
+            file_parent_dir = os.path.dirname(user_path)
+            chunk_type_dir = os.path.dirname(file_parent_dir)
+            method_indicator_from_path = os.path.basename(chunk_type_dir).lower()
             
             current_chunk_type = None
             for keyword, type_name in allowed_chunk_keywords.items():
                 if keyword in method_indicator_from_path:
                     current_chunk_type = type_name
                     break
-            
             if current_chunk_type:
-                print(f"Detected chunk type: {current_chunk_type} from path.")
+                print(f"Detected chunk type: {current_chunk_type} from path component '{method_indicator_from_path}'.")
                 return user_path, current_chunk_type
             else:
-                print(f"Error: Could not determine a valid chunk type (e.g., 'semantic-grouping', 'semantic-splitter', 'text-splitter')")
-                print(f"from the directory structure of the path: '{user_path}'.")
-                print(f"Expected the directory name '{user_path.split(os.sep)[-3]}' to contain one of these keywords.")
-                print("Please ensure the path points to a file within a correctly named chunk type directory.")
-                
-        except IndexError:
-            print(f"Error: The provided path '{user_path}' does not have the expected directory structure.")
-            print("Expected path format like .../dataset_chunkmethod/split_run_num/triplets_file.tsv")
+                print(f"Error: Could not determine a valid chunk type from path component '{method_indicator_from_path}' (derived from '{user_path}').")
+                print(f"Ensure '{method_indicator_from_path}' contains keywords like 'semantic-grouping', 'semantic-splitter', or 'text-splitter'.")
+        except Exception as e_path_parse: 
+            print(f"Error parsing path '{user_path}' to determine chunk type: {e_path_parse}")
         
         retry = input("Do you want to try entering the path again? (yes/no): ").strip().lower()
         if retry != 'yes':
             print("Exiting due to invalid training data path.")
             sys.exit(1)
 
-# --- 1. Constants and User Inputs ---
-# Get TRAIN_DATA_PATH and chunk_type_for_folder from user
 TRAIN_DATA_PATH, chunk_type_for_folder = get_validated_train_data_path()
-
-# Specify path to your GloVe file
-GLOVE_PATH = "D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt" # <<<--- !!! UPDATE THIS PATH !!!
-EMBEDDING_DIM = 100 # Should match the GloVe file dimension
-# MODEL_NAME_TO_RUN = "MatchLSTM" # Not available in MZ 2.1.0
-MODEL_NAME_TO_RUN = "KNRM"      # Use KNRM instead
-# or
-# MODEL_NAME_TO_RUN = "MVLSTM"    # Use MVLSTM instead
-
-# --- Dynamically create MODEL_OUTPUT_DIR based on TRAIN_DATA_PATH and current date ---
-# chunk_type_for_folder is now obtained from get_validated_train_data_path()
-
+GLOVE_PATH = "D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt" 
+EMBEDDING_DIM = 100
+MODEL_NAME_TO_RUN = select_model()
 current_date_str = datetime.now().strftime("%Y%m%d")
 base_trained_models_dir = "D:/SemanticSearch/TrainedModels"
-
 MODEL_OUTPUT_DIR = os.path.join(base_trained_models_dir, f"model_{MODEL_NAME_TO_RUN}_{chunk_type_for_folder}_{current_date_str}")
-# --- End of dynamic MODEL_OUTPUT_DIR creation ---
-
-BATCH_SIZE = 128 # Can often be larger for non-BERT models
-EPOCHS = 5 # Adjust as needed
-LEARNING_RATE = 1e-3 # Common starting point for these models
+BATCH_SIZE = 512
+EPOCHS = 5
+LEARNING_RATE = 1e-3
 HINGE_MARGIN = 1.0
-# Fixed lengths for preprocessor (adjust based on your data analysis)
 FIXED_LENGTH_LEFT = 30
 FIXED_LENGTH_RIGHT = 100
 
 os.makedirs(MODEL_OUTPUT_DIR, exist_ok=True)
-
-# --- Check GloVe Path ---
 if not os.path.exists(GLOVE_PATH):
     print(f"Error: GloVe file not found at {GLOVE_PATH}")
-    print("Please download GloVe (e.g., glove.6B.100d.txt) and update GLOVE_PATH in the script.")
     sys.exit(1)
 
-# --- 2. Load and Prepare Data for Ranking Task ---
-# MatchLSTM/KNRM with RankHingeLoss typically expect pairs with labels (1 for pos, 0 for neg)
-print("Loading training data and creating pairs...")
-ranking_data_list = []
-# limit = 1000 # Uncomment for quick testing
+print("Loading training data and preparing DataPack for MatchZoo 2.2...")
+queries = {}
+docs = {}
+relations_list = []
+query_counter = 0
+doc_counter = 0
 processed_triplets = 0
+
 with open(TRAIN_DATA_PATH, 'r', encoding='utf-8') as f:
     for i, line in enumerate(f):
-        # if i >= limit: break # Uncomment for quick testing
         parts = line.strip().split('\t')
         if len(parts) == 3:
-            anchor, positive, negative = parts[0], parts[1], parts[2]
-            # Add positive pair with label 1
-            ranking_data_list.append({
-                'text_left': anchor,
-                'text_right': positive,
-                'label': 1,
-                'id_left': f'q_{i}',
-                'id_right': f'p_{i}'
-            })
-            # Add negative pair with label 0
-            ranking_data_list.append({
-                'text_left': anchor,
-                'text_right': negative,
-                'label': 0,
-                'id_left': f'q_{i}',
-                'id_right': f'n_{i}'
-            })
+            query_text, positive_doc_text, negative_doc_text = parts[0], parts[1], parts[2]
+
+            if query_text not in queries:
+                queries[query_text] = f"q_{query_counter}"
+                query_counter += 1
+            query_id = queries[query_text]
+
+            if positive_doc_text not in docs:
+                docs[positive_doc_text] = f"d_{doc_counter}"
+                doc_counter += 1
+            positive_doc_id = docs[positive_doc_text]
+
+            if negative_doc_text not in docs:
+                docs[negative_doc_text] = f"d_{doc_counter}"
+                doc_counter += 1
+            negative_doc_id = docs[negative_doc_text]
+
+            relations_list.append({'id_left': query_id, 'id_right': positive_doc_id, 'label': 1})
+            relations_list.append({'id_left': query_id, 'id_right': negative_doc_id, 'label': 0})
             processed_triplets += 1
-        # else: print(f"Skipping invalid line {i+1}") # Debug
 
-print(f"Loaded {processed_triplets} triplets, created {len(ranking_data_list)} pairs.")
-train_df = pd.DataFrame(ranking_data_list)
-# Pack the DataFrame into MatchZoo's DataPack format
-# Ensure column names match what PairGenerator expects (text_left, text_right, label)
-train_pack = mz.pack(train_df)
+print(f"Loaded {processed_triplets} triplets.")
+print(f"Unique queries: {len(queries)}, Unique docs: {len(docs)}, Relations: {len(relations_list)}")
 
-# --- 3. Define Task ---
-# Define the Ranking task with RankHingeLoss
-print("Defining Ranking task with RankHingeLoss...")
+relation_df = pd.DataFrame(relations_list)
+left_df = pd.DataFrame([{'id_left': q_id, 'text_left': q_text} for q_text, q_id in queries.items()])
+right_df = pd.DataFrame([{'id_right': d_id, 'text_right': d_text} for d_text, d_id in docs.items()])
+
+left_df = left_df[['id_left', 'text_left']]
+right_df = right_df[['id_right', 'text_right']]
+relation_df = relation_df[['id_left', 'id_right', 'label']]
+
+print("Creating raw DataPack...")
+unique_ids_in_relation_left = set(relation_df['id_left'].unique())
+unique_ids_in_left_df = set(left_df['id_left'].unique())
+
+if not unique_ids_in_relation_left.issubset(unique_ids_in_left_df):
+    print("ERROR: Mismatch in id_left!")
+    missing_ids = unique_ids_in_relation_left - unique_ids_in_left_df
+    print(f"IDs in relation_df but not in left_df: {missing_ids}")
+    sys.exit("Exiting due to id_left inconsistency.")
+
 try:
-    # Try initializing Ranking by passing the loss instance with the 'loss' keyword
-    ranking_task = mz.tasks.Ranking(
-        loss=mz.losses.RankHingeLoss(margin=HINGE_MARGIN)
-        # Optionally assign metrics here if needed
-        # metrics=[mz.metrics.MeanAveragePrecision(), mz.metrics.NormalizedDiscountedCumulativeGain(k=3)]
+    train_pack_raw = mz.DataPack(
+        relation=relation_df,
+        left=left_df,
+        right=right_df
     )
-    print("Initialized Ranking task with RankHingeLoss.")
-
-except TypeError as e:
-    # Handle case where 'loss' keyword is also incorrect
-    print(f"TypeError during Ranking task initialization: {e}")
-    print("Could not initialize Ranking task with loss. Trying assignment...")
-    try:
-        # Fallback: Try assignment again (though it failed before)
-        ranking_task = mz.tasks.Ranking()
-        ranking_task.loss = mz.losses.RankHingeLoss(margin=HINGE_MARGIN)
-        print("Assigned RankHingeLoss to task after initialization.")
-    except Exception as assign_e:
-        print(f"Failed to assign loss after initialization: {assign_e}")
-        print("Please check MatchZoo 2.1.0 documentation for correct task/loss definition.")
-        sys.exit(1)
-except AttributeError as e:
-    # Handle case where Ranking or RankHingeLoss is not found
-    print(f"AttributeError defining task or loss: {e}")
-    print("Please check your MatchZoo version (expected 2.1.0) and its installation.")
-    sys.exit(1)
+    print(f"Raw DataPack created. Relation shape: {train_pack_raw.relation.shape}, Left shape: {train_pack_raw.left.shape}, Right shape: {train_pack_raw.right.shape}")
 except Exception as e:
-    print(f"An unexpected error occurred during task definition: {e}")
+    print(f"Error creating raw DataPack: {e}")
     sys.exit(1)
 
+print("Defining Ranking task...")
+ranking_task = mz.tasks.Ranking()
 
-# Assign the task to the datapack (optional for some generators, but good practice)
-train_pack.task = ranking_task
-
-# --- 4. Preprocessing ---
-# Use BasicPreprocessor for non-BERT models
 print("Initializing BasicPreprocessor...")
-# Initialize without fixed_length arguments
-preprocessor = mz.preprocessors.BasicPreprocessor(
-    # remove_stop_words=True # Optional
-)
-# Set fixed lengths after initialization
+preprocessor = mz.preprocessors.BasicPreprocessor()
 preprocessor.fixed_length_left = FIXED_LENGTH_LEFT
 preprocessor.fixed_length_right = FIXED_LENGTH_RIGHT
 print(f"Set fixed_length_left={FIXED_LENGTH_LEFT}, fixed_length_right={FIXED_LENGTH_RIGHT}")
 
-
 print("Fitting preprocessor...")
-# Fit on the data to build vocabulary
-preprocessor.fit(train_pack, verbose=1)
+preprocessor.fit(train_pack_raw, verbose=0)
 
-print("Loading GloVe embeddings manually...")
-# Get the term_index dictionary from the fitted preprocessor
-# Ensure the path to the vocab_unit and state is correct for MZ 2.1.0
+print("Loading GloVe embeddings...")
 try:
     term_index = preprocessor.context['vocab_unit'].state['term_index']
 except KeyError as e:
-     print(f"Error accessing term_index in preprocessor context: {e}")
-     print("Preprocessor context structure might have changed. Please inspect preprocessor.context.")
+     print(f"Error accessing term_index from preprocessor: {e}")
      sys.exit(1)
-except Exception as e:
-     print(f"An unexpected error occurred accessing term_index: {e}")
-     sys.exit(1)
-
-# Call the manual loading function
 embedding_matrix = load_glove_embeddings(GLOVE_PATH, term_index, EMBEDDING_DIM)
-print(f"Embedding matrix shape: {embedding_matrix.shape}")
 
 print("Transforming data...")
-# Transform the data using the fitted preprocessor
-try:
-    # Specify the text fields to process
-    train_processed = preprocessor.transform(train_pack, verbose=1)
-except Exception as e:
-    print(f"Error during preprocessing transform: {e}")
-    sys.exit(1)
+train_pack_processed_internal = preprocessor.transform(train_pack_raw, verbose=0)
 
-# Save preprocessor using dill
+processed_left_df = train_pack_processed_internal.left
+processed_right_df = train_pack_processed_internal.right
+processed_relation_df = train_pack_processed_internal.relation
+
+if 'id_left' in processed_left_df.columns:
+    processed_left_df = processed_left_df.set_index('id_left', drop=True)
+elif processed_left_df.index.name != 'id_left':
+    processed_left_df.index.name = 'id_left'
+
+if 'id_right' in processed_right_df.columns:
+    processed_right_df = processed_right_df.set_index('id_right', drop=True)
+elif processed_right_df.index.name != 'id_right':
+    processed_right_df.index.name = 'id_right'
+
+valid_left_ids = set(processed_left_df.index)
+valid_right_ids = set(processed_right_df.index)
+
+original_relation_count = len(processed_relation_df)
+processed_relation_df = processed_relation_df[
+    processed_relation_df['id_left'].isin(valid_left_ids) &
+    processed_relation_df['id_right'].isin(valid_right_ids)
+]
+filtered_relation_count = len(processed_relation_df)
+print(f"Relation filtering: Original count: {original_relation_count}, Filtered count: {filtered_relation_count}")
+if original_relation_count > filtered_relation_count:
+    print(f"INFO: Removed {original_relation_count - filtered_relation_count} relations due to missing IDs.")
+
+if filtered_relation_count == 0:
+    print("ERROR: No relations left after filtering. Cannot proceed.")
+    sys.exit("Exiting due to empty relations after filtering.")
+
+train_pack_for_generator = mz.DataPack(
+    relation=processed_relation_df,
+    left=processed_left_df,
+    right=processed_right_df
+)
+
 preprocessor_save_path = os.path.join(MODEL_OUTPUT_DIR, 'preprocessor.dill')
-print(f"Saving preprocessor to {preprocessor_save_path}...")
 try:
+    os.makedirs(os.path.dirname(preprocessor_save_path), exist_ok=True)
     with open(preprocessor_save_path, 'wb') as f:
         dill.dump(preprocessor, f)
-    print(f"Preprocessor saved successfully.")
+    print(f"Preprocessor saved to {preprocessor_save_path}")
 except Exception as e:
     print(f"Error saving preprocessor: {e}")
 
-# --- 5. Initialize Model ---
 print(f"Initializing model: {MODEL_NAME_TO_RUN}...")
-
-try:
-    if MODEL_NAME_TO_RUN == "MatchLSTM":
-        # Import directly from matchzoo.models
-        model = mz.models.MatchLSTM()
-        print("Using MatchLSTM from matchzoo.models")
-    elif MODEL_NAME_TO_RUN == "KNRM":
-        # Import directly from matchzoo.models
-        model = mz.models.KNRM()
-        print("Using KNRM from matchzoo.models")
-        # KNRM specific params (example, check docs)
-        # model.params['kernel_num'] = 11
-        # model.params['sigma'] = 0.1
-        # model.params['exact_sigma'] = 0.001
-    else:
-        print(f"Error: Unknown model name '{MODEL_NAME_TO_RUN}'")
-        sys.exit(1)
-
-except AttributeError:
-    # This error now means the model is truly missing from matchzoo.models
-    print(f"Error: Could not find {MODEL_NAME_TO_RUN} in matchzoo.models.")
-    print("Please ensure MatchZoo 2.1.0 is correctly installed and contains the model.")
-    sys.exit(1)
-except Exception as e:
-    print(f"An unexpected error occurred during model initialization: {e}")
+if MODEL_NAME_TO_RUN == "KNRM":
+    model = mz.models.KNRM()
+elif MODEL_NAME_TO_RUN == "MatchLSTM":
+    model = mz.models.MatchLSTM()
+    model.params['hidden_size'] = 200
+    model.params['dropout'] = 0.2
+    model.params['lstm_layer'] = 1
+    model.params['drop_lstm'] = False
+    model.params['concat_lstm'] = True
+    model.params['rnn_type'] = 'lstm'
+else:
+    print(f"Error: Model {MODEL_NAME_TO_RUN} is not currently supported or defined in the script.")
     sys.exit(1)
 
-
-# Set common model parameters
 model.params['task'] = ranking_task
-# model.params['embedding'] = embedding_matrix # <<< REMOVE OR COMMENT OUT THIS LINE
-model.params['embedding_input_dim'] = embedding_matrix.shape[0] # Vocab size
-model.params['embedding_output_dim'] = embedding_matrix.shape[1] # Embedding dimension
-model.params['embedding_trainable'] = False # <<< ADD THIS LINE to use pre-trained weights without fine-tuning
 
-model.guess_and_fill_missing_params() # Let this handle parameter setup
-print("Building model...")
-try:
-    model.build() # Model build should infer shapes
+loss_function = mz.losses.RankHingeLoss(margin=HINGE_MARGIN)
+evaluation_metrics = [mz.metrics.MeanAveragePrecision(), 
+                        mz.metrics.NormalizedDiscountedCumulativeGain(k=3),
+                        mz.metrics.NormalizedDiscountedCumulativeGain(k=5),
+                        mz.metrics.MeanReciprocalRank()]
 
-    # --- Potential Step: Manually set weights AFTER build ---
-    # If build() doesn't automatically use the matrix, you might need this:
-    # try:
-    #     # Find the embedding layer (name might vary)
-    #     embedding_layer = model._backend.get_layer(index=1) # Or find by name='embedding'
-    #     if isinstance(embedding_layer, keras.layers.Embedding):
-    #          print(f"Setting weights for embedding layer: {embedding_layer.name}")
-    #          embedding_layer.set_weights([embedding_matrix])
-    #     else:
-    #          print("Warning: Could not find Keras Embedding layer to set weights.")
-    # except Exception as set_weight_e:
-    #     print(f"Warning: Failed to manually set embedding weights: {set_weight_e}")
-    # ---------------------------------------------------------
-
-except Exception as e:
-    print(f"Error building model: {e}")
-    sys.exit(1)
-
-print("Model Structure:")
-print(model) # Print model summary
-
-# --- 6. Create Data Generator ---
-print("Creating data generator...")
-try:
-    # Use the main DataGenerator class with mode='pair' for ranking tasks
-    train_generator = mz.data_generator.DataGenerator( # Use DataGenerator class
-        data_pack=train_processed,       # Pass the processed DataPack
-        mode='pair',                  # Specify pair mode for ranking
-        num_dup=1,                    # Default value, adjust if needed
-        num_neg=1,                    # Default value, adjust if needed
-        batch_size=BATCH_SIZE,
-        shuffle=True
-        # Removed stage='train' as it might not be a param for DataGenerator.__init__
-    )
-    print(f"Generator created with batch size {BATCH_SIZE} using mz.data_generator.DataGenerator(mode='pair').")
-
-except AttributeError:
-    # This error would now indicate a problem finding DataGenerator itself
-    print("Error: Could not find DataGenerator in mz.data_generator.")
-    print("Please check your MatchZoo version (expected 2.1.0) and its installation.")
-    sys.exit(1)
-except Exception as e:
-    print(f"Error creating data generator: {e}")
-    sys.exit(1)
-
-# Check the number of batches
-print(f"Number of batches in generator: {len(train_generator)}")
-if len(train_generator) == 0:
-    print("Error: Data generator created 0 batches. Check data processing and batch size.")
-    sys.exit(1)
-
-# --- 7. Compile and Train Model using Keras API ---
-print("Compiling model with Keras optimizer...")
-try:
-    # Use a Keras optimizer (Adam is common)
-    optimizer = keras.optimizers.Adam(learning_rate=LEARNING_RATE)
-
-    # Compile the underlying Keras model directly via model._backend
-    # The MatchZoo model wrapper might have its own compile method with a different signature.
-    if hasattr(model, '_backend') and hasattr(model._backend, 'compile'):
-        print("Compiling the underlying Keras model (model._backend)...")
-        # Call compile on the Keras model, passing the loss function from the task
-        model._backend.compile(optimizer=optimizer, loss=ranking_task.loss)
-        print("Underlying Keras model compiled successfully.")
-    else:
-        print("Error: Could not find a Keras backend model or its compile method.")
-        sys.exit(1)
-
-except AttributeError as e:
-     print(f"Error accessing model._backend or task.loss: {e}")
-     print("Model structure or task definition might be different than expected.")
-     sys.exit(1)
-except Exception as e:
-    print(f"Error compiling model: {e}")
-    sys.exit(1)
-
-print("Starting training using model.fit()...")
-try:
-    # Define Keras callbacks if needed (e.g., ModelCheckpoint)
-    checkpoint_path = os.path.join(MODEL_OUTPUT_DIR, 'keras_model_epoch_{epoch:02d}.h5')
-    model_checkpoint_callback = keras.callbacks.ModelCheckpoint(
-        filepath=checkpoint_path,
-        save_weights_only=True, # Save entire model (weights are saved within the .h5 file)
-        monitor='loss', # Monitor training loss
-        mode='min',
-        save_best_only=False) # Save at each epoch end
-
-    # Call fit on the underlying Keras model directly, as train_generator is a Keras Sequence
-    if hasattr(model, '_backend') and hasattr(model._backend, 'fit'):
-        print("Calling fit on the underlying Keras model (model._backend)...")
-        history = model._backend.fit( # <<< CALL FIT ON THE BACKEND MODEL
-            train_generator,
-            epochs=EPOCHS,
-            callbacks=[model_checkpoint_callback], # Add callbacks here
-            verbose=1
-        )
-        print("Training finished.")
-        print(f"Keras model checkpoints saved in: {MODEL_OUTPUT_DIR}")
-    else:
-        print("Error: Could not find a Keras backend model or its fit method.")
-        sys.exit(1)
-
-except Exception as e:
-    print(f"An error occurred during training: {e}")
-    import traceback
-    traceback.print_exc()
-    sys.exit(1)
-
-# <<< MODIFIED SECTION FOR SAVING MODEL >>>
-print(f"Preparing to save MatchZoo model components to: {MODEL_OUTPUT_DIR}")
-
-# Print model.params for inspection
-print("\n--- Inspecting model.params before saving ---")
-if hasattr(model, 'params'):
-    print(f"model.params type: {type(model.params)}")
-    try:
-        if hasattr(model.params, 'to_dict'):
-            print(f"model.params content: {model.params.to_dict()}")
-        elif isinstance(model.params, dict):
-            print(f"model.params content: {model.params}")
-        else:
-            print(f"model.params content (raw): {model.params}") # Should show ParamTable
-    except Exception as e_params_print:
-        print(f"Could not print model.params details: {e_params_print}")
+if 'loss' not in model.params:
+    model.params.add(mz.Param(name='loss', value=loss_function, desc="Loss function for training"))
 else:
-    print("model.params attribute not found.")
-print("--- End of model.params inspection ---\n")
+    model.params['loss'] = loss_function
 
+if 'metrics' not in model.params:
+    model.params.add(mz.Param(name='metrics', value=evaluation_metrics, desc="Metrics for evaluation"))
+else:
+    model.params['metrics'] = evaluation_metrics
 
-temp_mz_save_dir = MODEL_OUTPUT_DIR + "_temp_mz_save"
-import shutil
-
-if os.path.exists(temp_mz_save_dir):
-    print(f"Removing existing temporary MatchZoo save directory: {temp_mz_save_dir}")
-    shutil.rmtree(temp_mz_save_dir)
-
-print(f"Attempting to save MatchZoo model core files to temporary location: {temp_mz_save_dir}")
-model_save_successful = False
-try:
-    model.save(temp_mz_save_dir)
-    print(f"model.save() call completed for {temp_mz_save_dir}")
-    model_save_successful = True
-
-    if os.path.exists(temp_mz_save_dir) and os.path.isdir(temp_mz_save_dir):
-        print(f"Temporary directory {temp_mz_save_dir} exists.")
-        temp_dir_contents = os.listdir(temp_mz_save_dir)
-        print(f"Contents of {temp_mz_save_dir}: {temp_dir_contents}")
-        if not temp_dir_contents:
-            print(f"WARNING: {temp_mz_save_dir} was created but is EMPTY after model.save().")
-            model_save_successful = False # Treat as failure if empty
+if MODEL_NAME_TO_RUN == "DSSM":
+    if 'vocab_size' not in model.params:
+        model.params.add(mz.Param(name='vocab_size', value=embedding_matrix.shape[0], desc="Vocabulary size for DSSM MLPs"))
     else:
-        print(f"ERROR: Temporary directory {temp_mz_save_dir} was NOT created by model.save() or is not a directory.")
-        model_save_successful = False
+        model.params['vocab_size'] = embedding_matrix.shape[0]
 
-except Exception as e_model_save:
-    print(f"!!! CRITICAL ERROR during model.save('{temp_mz_save_dir}') call: {e_model_save} !!!")
-    import traceback
-    traceback.print_exc()
-    model_save_successful = False
+embedding_params_to_add = {
+    'embedding_input_dim': embedding_matrix.shape[0],
+    'embedding_output_dim': embedding_matrix.shape[1],
+    'embedding_trainable': False
+}
 
-if model_save_successful:
-    print(f"Proceeding to copy files from {temp_mz_save_dir} to {MODEL_OUTPUT_DIR}")
-    # <<< SỬA ĐỔI TÊN FILE MONG ĐỢI >>>
-    # MatchZoo 2.1.0 model.save() seems to create params.dill and backend_weights.h5
-    # config.json might not be created by default with this save method.
-    matchzoo_core_files_to_copy = {
-        'params.dill': 'params.dill',             # Source name : Destination name
-        'backend_weights.h5': 'backend_weights.h5'  # Source name : Destination name
-        # 'config.json': 'config.json' # config.json might not be generated by model.save()
-    }
-    all_files_copied_successfully = True
+for param_name, param_value in embedding_params_to_add.items():
+    if param_name not in model.params:
+        model.params.add(mz.Param(name=param_name, value=param_value, desc=f"{param_name} for embedding layer"))
+    else:
+        model.params[param_name] = param_value
 
-    for source_filename, dest_filename in matchzoo_core_files_to_copy.items():
-        temp_file_path = os.path.join(temp_mz_save_dir, source_filename)
-        final_file_path = os.path.join(MODEL_OUTPUT_DIR, dest_filename)
-
-        if os.path.exists(final_file_path):
-            try:
-                os.remove(final_file_path)
-            except Exception as e_remove_old:
-                print(f"Warning: Could not remove old version of {final_file_path}. Error: {e_remove_old}")
-
-        if os.path.exists(temp_file_path):
-            try:
-                shutil.copy2(temp_file_path, final_file_path)
-                print(f"Copied {source_filename} to {final_file_path}")
-            except Exception as e_copy:
-                print(f"Error copying {source_filename} to {final_file_path}: {e_copy}")
-                all_files_copied_successfully = False
-        else:
-            print(f"Warning: Expected file {source_filename} not found in temporary save directory {temp_mz_save_dir}. Cannot copy.")
-            all_files_copied_successfully = False
+print("Guessing and filling missing params...")
+model.guess_and_fill_missing_params()
+try:
+    embedding_matrix = torch.from_numpy(embedding_matrix).float()
+    print(f"Embedding matrix dtype: {embedding_matrix.dtype}")
     
-    if all_files_copied_successfully:
-        print(f"MatchZoo model components successfully integrated into: {MODEL_OUTPUT_DIR}")
-    else:
-        print(f"Warning: Not all expected MatchZoo core files could be copied to {MODEL_OUTPUT_DIR}.")
-else:
-    print(f"Skipping file copying because model.save() to {temp_mz_save_dir} failed or did not produce the expected directory/files.")
+    model.build()
+    print(f"Model dtype before conversion: {next(model.parameters()).dtype}")
+    
+    model = model.float()
+    print(f"Model dtype after conversion: {next(model.parameters()).dtype}")
+    
+    for param in model.parameters():
+        param.data = param.data.float()
+    print(f"Model parameters dtype after loop: {next(model.parameters()).dtype}")
 
-print(f"Final model artifacts are in: {MODEL_OUTPUT_DIR}")
+    if 'embedding_layer_name' in model.params:
+        embedding_layer_name = model.params['embedding_layer_name'] 
+    else:
+        embedding_layer_name = 'embedding' 
+    
+    found_embedding_layer = False
+    try:
+        model.embedding.weight.data = embedding_matrix
+        print(f"Successfully set weights for embedding layer: {embedding_layer_name}")
+        print(f"Embedding layer dtype: {model.embedding.weight.dtype}")
+        found_embedding_layer = True
+    except Exception as e_set_weights:
+        print(f"Error setting weights for layer {embedding_layer_name}: {e_set_weights}")
+    
+    if not found_embedding_layer:
+        print("Warning: Could not automatically find and set weights for an embedding layer.")
+
+except Exception as e:
+    print(f"Error building model or setting embedding weights: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+
+class MatchZooDataset(Dataset):
+    def __init__(self, data_pack, max_len_left=30, max_len_right=100):
+        self.data_pack = data_pack
+        self.relations = data_pack.relation.reset_index(drop=True)
+        self.left = data_pack.left
+        self.right = data_pack.right
+        self.max_len_left = max_len_left
+        self.max_len_right = max_len_right
+
+    def __len__(self):
+        return len(self.relations)
+
+    def pad_sequence(self, seq, max_len):
+        if len(seq) > max_len:
+            return seq[:max_len]
+        return seq + [0] * (max_len - len(seq))
+
+    def __getitem__(self, idx):
+        relation = self.relations.iloc[idx]
+        left_id = relation['id_left']
+        right_id = relation['id_right']
+        label = relation['label']
+
+        left_text = self.left.loc[left_id]['text_left']
+        right_text = self.right.loc[right_id]['text_right']
+
+        left_text = self.pad_sequence(left_text, self.max_len_left)
+        right_text = self.pad_sequence(right_text, self.max_len_right)
+
+        return {
+            'text_left': torch.tensor(left_text, dtype=torch.long),
+            'text_right': torch.tensor(right_text, dtype=torch.long),
+            'label': torch.tensor(label, dtype=torch.float)
+        }
+
+print("Creating data generator...")
+dataset = MatchZooDataset(train_pack_for_generator, 
+                         max_len_left=FIXED_LENGTH_LEFT,
+                         max_len_right=FIXED_LENGTH_RIGHT)
+train_generator = DataLoader(
+    dataset=dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True
+)
+if len(train_generator) == 0:
+    print("Error: Data generator created 0 batches.")
+    sys.exit(1)
+
+print("Setting up optimizer and loss function...")
+optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+criterion = torch.nn.BCEWithLogitsLoss()
+
+print("Starting training...")
+model.train()
+for epoch in range(EPOCHS):
+    total_loss = 0
+    for batch_idx, batch in enumerate(train_generator):
+        optimizer.zero_grad()
+        
+        text_left = batch['text_left'].to(torch.float32)
+        text_right = batch['text_right'].to(torch.float32)
+        labels = batch['label'].to(torch.float32)
+        
+        model_input = {
+            'text_left': text_left,
+            'text_right': text_right
+        }
+        
+        outputs = model(model_input)
+        
+        if outputs.dim() == 1:
+            outputs = outputs.unsqueeze(1)
+        if labels.dim() == 1:
+            labels = labels.unsqueeze(1)
+            
+        outputs = outputs.to(torch.float32)
+            
+        loss = criterion(outputs, labels)
+        
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        
+        if batch_idx % 100 == 0:
+            print(f"Epoch {epoch+1}/{EPOCHS}, Batch {batch_idx}/{len(train_generator)}, Current Loss: {loss.item():.4f}")
+    
+    avg_loss = total_loss / len(train_generator)
+    print(f"Epoch {epoch+1}/{EPOCHS}, Average Loss: {avg_loss:.4f}")
+
+print("Training finished.")
+
+print(f"Saving MatchZoo model to: {MODEL_OUTPUT_DIR}")
+try:
+    # Save PyTorch model state dict (only save weights)
+    model_save_path = os.path.join(MODEL_OUTPUT_DIR, 'model.pt')
+    torch.save(model.state_dict(), model_save_path)
+    print(f"PyTorch model weights saved successfully to {model_save_path}")
+
+    # Save Keras weights for compatibility with evaluate_matchzoo.py
+    weights_save_path = os.path.join(MODEL_OUTPUT_DIR, 'weights.h5')
+    try:
+        # Try to access backend directly
+        if hasattr(model, 'backend'):
+            model.backend.save_weights(weights_save_path)
+            print(f"Keras weights saved successfully to {weights_save_path}")
+        else:
+            # If no backend attribute, try to save weights using PyTorch format
+            torch.save(model.state_dict(), weights_save_path)
+            print(f"Model weights saved in PyTorch format to {weights_save_path}")
+    except Exception as e:
+        print(f"Warning: Could not save weights in Keras format: {e}")
+        print("Attempting to save weights in PyTorch format...")
+        try:
+            torch.save(model.state_dict(), weights_save_path)
+            print(f"Model weights saved in PyTorch format to {weights_save_path}")
+        except Exception as e2:
+            print(f"Error saving weights in any format: {e2}")
+
+    # Save preprocessor
+    preprocessor_save_path = os.path.join(MODEL_OUTPUT_DIR, 'preprocessor.dill')
+    with open(preprocessor_save_path, 'wb') as f:
+        dill.dump(preprocessor, f)
+    print(f"Preprocessor saved to {preprocessor_save_path}")
+
+    # Save model config
+    config_save_path = os.path.join(MODEL_OUTPUT_DIR, 'config.json')
+    config = {
+        'model_name': MODEL_NAME_TO_RUN,
+        'batch_size': BATCH_SIZE,
+        'epochs': EPOCHS,
+        'learning_rate': LEARNING_RATE,
+        'fixed_length_left': FIXED_LENGTH_LEFT,
+        'fixed_length_right': FIXED_LENGTH_RIGHT,
+        'embedding_dim': EMBEDDING_DIM,
+        'model_params': {
+            'hidden_size': model.params['hidden_size'] if 'hidden_size' in model.params else None,
+            'dropout': model.params['dropout'] if 'dropout' in model.params else None,
+            'lstm_layer': model.params['lstm_layer'] if 'lstm_layer' in model.params else None,
+            'drop_lstm': model.params['drop_lstm'] if 'drop_lstm' in model.params else None,
+            'concat_lstm': model.params['concat_lstm'] if 'concat_lstm' in model.params else None,
+            'rnn_type': model.params['rnn_type'] if 'rnn_type' in model.params else None
+        }
+    }
+    with open(config_save_path, 'w') as f:
+        json.dump(config, f, indent=4)
+    print(f"Model config saved to {config_save_path}")
+
+except Exception as e:
+    print(f"Error saving model artifacts: {e}")
+    import traceback
+    traceback.print_exc()
+
+print(f"Final model artifacts should be in: {MODEL_OUTPUT_DIR}")
 print(f"Contents of {MODEL_OUTPUT_DIR}: {os.listdir(MODEL_OUTPUT_DIR) if os.path.exists(MODEL_OUTPUT_DIR) else 'Directory not found'}")
 
-if os.path.exists(temp_mz_save_dir):
-    print(f"Removing temporary MatchZoo save directory: {temp_mz_save_dir}")
-    try:
-        shutil.rmtree(temp_mz_save_dir)
-    except Exception as e_rm_temp:
-        print(f"Warning: Could not remove temporary directory {temp_mz_save_dir}. Error: {e_rm_temp}")
-# <<< END OF MODIFIED SECTION >>>
-
-exit()
-
-
+print("Script finished.")
