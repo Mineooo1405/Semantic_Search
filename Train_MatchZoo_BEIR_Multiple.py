@@ -1,26 +1,24 @@
 import pandas as pd
 import nltk
-import os
-import re
+import os # Ensure os is imported
+import re # Ensure re is imported
 from tqdm.auto import tqdm
-import random
-import json
-import hashlib
 from beir import util
 from beir.datasets.data_loader import GenericDataLoader
-import numpy as np
 from typing import List, Tuple, Dict, Callable, Optional, Union
 import concurrent.futures
 import functools
 import traceback
-import atexit # <<< THÊM IMPORT NÀY
+import atexit # Ensure atexit is imported
 from Semantic_Grouping import semantic_chunk_passage_from_grouping_logic
 from Semantic_Splitter import chunk_passage_semantic_splitter
 from Text_Splitter import chunk_passage_text_splitter    
 # Sửa đổi import nếu OIE.py đã tích hợp caching vào extract_triples
-from Tool.OIE import extract_triples, close_oie_clients # <<< THÊM close_oie_clients
+from Tool.OIE import extract_relations_from_paragraph, close_oie_clients # MODIFIED OIE import
 import torch # Thêm import này ở đầu file nếu chưa có
 import torch_directml # Thêm import này ở đầu file nếu chưa có
+import json # Add this line
+import random # Add this line
 
 # Đăng ký hàm để được gọi khi script thoát
 atexit.register(close_oie_clients) # <<< THÊM DÒNG NÀY
@@ -294,27 +292,25 @@ def get_chunk_text_with_oie(chunk_text: str, include_oie: bool) -> str:
     if not include_oie or not chunk_text.strip():
         return chunk_text
     
-    aggregated_oie_triples = []
     try:
-        sentences_in_chunk = nltk.sent_tokenize(chunk_text)
-        if not sentences_in_chunk:
-            return chunk_text
-
-        for sentence in sentences_in_chunk:
-            if not sentence.strip():
-                continue
-            try:
-                oie_triples_for_sentence = extract_triples(sentence) # From Tool.OIE
-                if oie_triples_for_sentence:
-                    aggregated_oie_triples.extend(oie_triples_for_sentence)
-            except Exception as e_sent_oie:
-                print(f"Warning: Error extracting OIE for sentence '{sentence[:50]}...': {e_sent_oie}")
+        # Call the updated function from Tool.OIE, 
+        # using enhanced_settings as per previous logic.
+        relations = extract_relations_from_paragraph(chunk_text, use_enhanced_settings=True) 
         
-        if aggregated_oie_triples:
-            oie_string = format_oie_triples_to_string(aggregated_oie_triples)
-            return chunk_text.strip() + oie_string 
+        if relations:
+            oie_string = format_oie_triples_to_string(relations)
+            # Append OIE string only if it's not empty
+            if oie_string: 
+                return f"{chunk_text}{oie_string}"
+        # If no relations were extracted or the formatted string is empty,
+        # fall through to return the original chunk_text.
+            
     except Exception as e_chunk_oie:
-        print(f"Warning: Error processing OIE for chunk: {e_chunk_oie}")
+        # Log the error with some context from the chunk
+        print(f"[ERROR OIE] Error during OIE extraction for chunk starting with '{chunk_text[:50]}...': {e_chunk_oie}")
+        # In case of an error during OIE, return the original chunk_text
+        pass 
+    
     return chunk_text
 # --- End OIE Helper Functions ---
 
@@ -437,12 +433,39 @@ if __name__ == "__main__":
 
             # <<< SỬA ĐỔI: Sử dụng download_path (chính là dataset_specific_path) và bỏ prefix >>>
             corpus, queries, qrels = GenericDataLoader(data_folder=download_path).load(split=split_type)
-            print(f"Successfully loaded {len(corpus)} documents, {len(queries)} queries, and qrels for {len(qrels)} queries for split '{split_type}' from {download_path}.")
+
         except Exception as download_err:
-            print(f"Failed to download or load the dataset after download attempt: {download_err}")
-            # <<< SỬA ĐỔI: Thông báo lỗi bao gồm đường dẫn đúng >>>
-            print(f"Please manually check the directory structure. Ensure '{dataset_specific_path}' contains corpus.jsonl, queries.jsonl, and qrels/{split_type}.tsv.")
-            exit()
+            print(f"CRITICAL: Failed to download or load dataset after download attempt: {download_err}")
+            exit(1)
+
+    # --- THÊM: Lưu trữ dữ liệu BEIR gốc ---
+    print(f"Saving original BEIR data to {OUTPUT_DIR_METHOD}...")
+    original_corpus_path = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_original_corpus.json")
+    original_queries_path = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_original_queries.json")
+    original_qrels_path = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_original_qrels.json")
+
+    try:
+        with open(original_corpus_path, 'w', encoding='utf-8') as f:
+            json.dump(corpus, f, ensure_ascii=False, indent=4)
+        print(f"Original corpus saved to: {original_corpus_path}")
+    except Exception as e_corpus_save:
+        print(f"Warning: Could not save original corpus: {e_corpus_save}")
+
+    try:
+        with open(original_queries_path, 'w', encoding='utf-8') as f:
+            json.dump(queries, f, ensure_ascii=False, indent=4)
+        print(f"Original queries saved to: {original_queries_path}")
+    except Exception as e_queries_save:
+        print(f"Warning: Could not save original queries: {e_queries_save}")
+
+    try:
+        with open(original_qrels_path, 'w', encoding='utf-8') as f:
+            json.dump(qrels, f, ensure_ascii=False, indent=4)
+        print(f"Original qrels saved to: {original_qrels_path}")
+    except Exception as e_qrels_save:
+        print(f"Warning: Could not save original qrels: {e_qrels_save}")
+    # --- KẾT THÚC LƯU TRỮ DỮ LIỆU GỐC ---
+
 
     # --- THÊM: Xác định các tài liệu liên quan từ qrels ---
     print("Identifying relevant documents from qrels...")

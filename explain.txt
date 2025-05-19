@@ -1,0 +1,149 @@
+Giải thích chi tiết các tham số của các mô hình trong train_model.py (MatchZoo)
+
+LƯU Ý CHUNG:
+Hai tham số nền tảng thường được cấu hình cho tất cả các mô hình trong MatchZoo khi thực hiện tác vụ xếp hạng (ranking):
+1.  `task` (Tác vụ): Đây là đối tượng định nghĩa mục tiêu học của mô hình. Trong trường hợp này, đó là `mz.tasks.Ranking()`. Nó xác định cách mô hình xử lý đầu vào (thường là cặp query-document), cấu trúc đầu ra (điểm relevancy), và hàm mất mát (loss function) phù hợp cho việc xếp hạng.
+2.  `embedding` (Nhúng từ): Đây là một ma trận nhúng (embedding matrix) chứa các vector từ đã được huấn luyện trước (ví dụ: GloVe, Word2Vec). Mỗi từ trong bộ từ vựng sẽ được ánh xạ tới một vector dày đặc. Ma trận này cung cấp biểu diễn ngữ nghĩa ban đầu cho các từ trong văn bản đầu vào. Trong `train_model.py`, tham số này được gán giá trị `embedding_matrix_loaded`.
+
+Dưới đây là giải thích chi tiết cho từng mô hình cụ thể:
+
+---
+1. KNRM (Kernel-based Neural Ranking Model)
+---
+KNRM là một mô hình xếp hạng dựa trên kernel, tập trung vào việc so khớp (matching) các biểu diễn từ (word embeddings) giữa câu query và tài liệu bằng cách sử dụng các kernel RBF (Radial Basis Function).
+
+Các tham số được cấu hình trong `train_model.py`:
+*   `kernel_num` (Số lượng kernel):
+    *   Giải thích: KNRM sử dụng một tập hợp các kernel RBF để đo lường sự tương tự giữa các cặp từ (hoặc n-gram) từ query và document. Mỗi kernel được "điều chỉnh" để nhạy cảm với một mức độ tương tự cosine cụ thể (ví dụ: một kernel cho perfect match, các kernel cho các mức độ tương tự gần hoàn hảo, trung bình, thấp, v.v.).
+    *   Giá trị ví dụ: `21`. Điều này có nghĩa là mô hình sẽ sử dụng 21 kernel, mỗi kernel đại diện cho một "bin" hoặc một mức độ tương tự khác nhau. Các tâm của các kernel này thường được phân bố đều trong khoảng [-1, 1] (phạm vi của độ tương tự cosine), với một kernel đặc biệt cho exact match.
+*   `sigma` (Độ rộng của kernel RBF):
+    *   Giải thích: Đây là tham số sigma trong công thức của kernel RBF: `exp(-||x-y||^2 / (2*sigma^2))`. Nó kiểm soát độ "mềm" hoặc "độ rộng" của mỗi kernel.
+        *   Sigma nhỏ: Tạo ra các kernel "nhọn", nghĩa là kernel chỉ kích hoạt mạnh khi độ tương tự cosine giữa hai vector từ rất gần với tâm (mean) của kernel đó.
+        *   Sigma lớn: Tạo ra các kernel "rộng", nghĩa là kernel sẽ kích hoạt cho một phạm vi độ tương tự rộng hơn xung quanh tâm của nó.
+    *   Giá trị ví dụ: `0.1`.
+*   `exact_sigma` (Sigma cho kernel exact match):
+    *   Giải thích: Thông thường, một trong số các kernel (thường là kernel có tâm tại giá trị tương tự cosine là 1.0) được dành riêng để nắm bắt các trường hợp "exact match" (trùng khớp hoàn toàn). Kernel này thường có giá trị sigma rất nhỏ (`exact_sigma`) để đảm bảo nó chỉ kích hoạt mạnh khi có sự trùng khớp hoàn hảo về mặt ngữ nghĩa (theo embedding) giữa các từ.
+    *   Giá trị ví dụ: `0.001`.
+
+---
+2. MatchLSTM
+---
+MatchLSTM là một mô hình sử dụng mạng Long Short-Term Memory (LSTM) để học biểu diễn theo ngữ cảnh của câu query và document, sau đó so khớp chúng.
+
+Các tham số được cấu hình trong `train_model.py`:
+*   `hidden_size` (Kích thước lớp ẩn LSTM):
+    *   Giải thích: Xác định số lượng đơn vị (units hay neurons) trong các lớp ẩn của mạng LSTM. Kích thước này quyết định "dung lượng" của LSTM để lưu trữ thông tin từ chuỗi đầu vào. Kích thước lớn hơn cho phép LSTM học các biểu diễn phức tạp hơn, nhưng cũng làm tăng số lượng tham số của mô hình và có thể dẫn đến overfitting nếu không đủ dữ liệu.
+    *   Giá trị ví dụ: `128`.
+*   `lstm_layers` (Số lớp LSTM):
+    *   Giải thích: Số lượng lớp LSTM được xếp chồng lên nhau. Việc sử dụng nhiều lớp LSTM (stacked LSTM) có thể giúp mô hình học các phụ thuộc và đặc trưng trừu tượng ở các cấp độ khác nhau trong chuỗi văn bản. Tuy nhiên, điều này cũng làm tăng độ phức tạp tính toán và số lượng tham số.
+    *   Giá trị ví dụ: `1`.
+*   `dropout` (Tỷ lệ dropout):
+    *   Giải thích: Dropout là một kỹ thuật regularization phổ biến để giảm overfitting trong mạng neural. Trong quá trình huấn luyện, một tỷ lệ (`dropout`) các đơn vị (neurons) trong lớp LSTM (hoặc đầu ra của nó) sẽ được bỏ qua (tạm thời đặt giá trị về 0) một cách ngẫu nhiên ở mỗi bước huấn luyện. Điều này ngăn chặn mô hình trở nên quá phụ thuộc vào một số ít đơn vị cụ thể và giúp cải thiện khả năng tổng quát hóa trên dữ liệu mới.
+    *   Giá trị ví dụ: `0.1` (nghĩa là 10% đơn vị sẽ bị bỏ qua).
+
+---
+3. ArcI (Architecture I for Text Matching)
+---
+ArcI là một kiến trúc dựa trên mạng CNN (Convolutional Neural Network) để trích xuất đặc trưng từ các cặp văn bản và sau đó so khớp chúng.
+
+Các tham số được cấu hình trong `train_model.py`:
+*   `left_length`, `right_length` (Độ dài cố định của input trái/phải):
+    *   Giải thích: Xác định độ dài tối đa cho các chuỗi văn bản đầu vào (thường là query cho `left` và document cho `right`). Các chuỗi ngắn hơn độ dài này sẽ được đệm (padding) bằng các giá trị đặc biệt (ví dụ: 0), và các chuỗi dài hơn sẽ bị cắt bớt (truncating). Điều này cần thiết vì các lớp CNN thường yêu cầu đầu vào có kích thước cố định.
+    *   Giá trị ví dụ: `actual_fixed_length_left`, `actual_fixed_length_right` (được tính toán từ dữ liệu).
+*   `left_filters`, `right_filters` (Số lượng bộ lọc CNN cho mỗi bên):
+    *   Giải thích: Đây là danh sách, mỗi phần tử trong danh sách tương ứng với một lớp convolution. Giá trị của phần tử là số lượng bộ lọc (filters hoặc feature maps) mà lớp convolution đó sẽ học. Nhiều bộ lọc hơn cho phép mô hình học được nhiều loại đặc trưng cục bộ (local features) khác nhau từ văn bản.
+    *   Giá trị ví dụ: `[128]` (một lớp CNN với 128 bộ lọc cho mỗi bên).
+*   `left_kernel_sizes`, `right_kernel_sizes` (Kích thước kernel CNN cho mỗi bên):
+    *   Giải thích: Danh sách kích thước của cửa sổ trượt (kernel) trong các lớp convolution. Ví dụ, nếu `embedding_dim` là 100 và `kernel_size` là `3`, thì kernel sẽ có kích thước `3 x 100` (xem xét 3 từ cùng một lúc). Kích thước kernel khác nhau giúp nắm bắt các n-gram features khác nhau (ví dụ: kernel size 3 nắm bắt trigram, size 5 nắm bắt 5-gram).
+    *   Giá trị ví dụ: `[3]` (kernel size là 3 cho mỗi bên).
+*   `left_pool_sizes`, `right_pool_sizes` (Kích thước pooling cho mỗi bên):
+    *   Giải thích: Danh sách kích thước của cửa sổ pooling (ví dụ: max pooling) được áp dụng sau mỗi lớp convolution. Pooling giúp giảm chiều dữ liệu (số lượng tham số) và làm cho biểu diễn trở nên bất biến hơn đối với các thay đổi nhỏ về vị trí của đặc trưng.
+    *   Giá trị ví dụ: `[4]` (kích thước pooling là 4 cho mỗi bên).
+*   `conv_activation_func` (Hàm kích hoạt cho CNN):
+    *   Giải thích: Hàm phi tuyến tính được áp dụng sau mỗi phép convolution. Các lựa chọn phổ biến bao gồm 'relu' (Rectified Linear Unit), 'tanh', 'sigmoid'. 'relu' thường được ưa chuộng vì tính hiệu quả tính toán và khả năng giảm thiểu vấn đề vanishing gradient.
+    *   Giá trị ví dụ: `'relu'`.
+*   `mlp_num_units` (Số đơn vị trong các lớp MLP):
+    *   Giải thích: Sau khi các đặc trưng được trích xuất bởi CNN và pooling, chúng thường được đưa qua một mạng MLP (Multi-Layer Perceptron) để kết hợp và đưa ra dự đoán cuối cùng. Tham số này xác định số lượng neurons trong mỗi lớp ẩn của MLP đó.
+    *   Giá trị ví dụ: `100`.
+*   `mlp_num_layers` (Số lớp MLP):
+    *   Giải thích: Số lượng lớp ẩn trong mạng MLP cuối cùng.
+    *   Giá trị ví dụ: `3`.
+*   `mlp_num_fan_out` (Số đơn vị lớp kế cuối MLP):
+    *   Giải thích: Số lượng neurons trong lớp ẩn ngay trước lớp output của MLP. Lớp output thường có 1 neuron cho tác vụ ranking (đại diện cho điểm relevancy).
+    *   Giá trị ví dụ: `64`.
+*   `mlp_activation_func` (Hàm kích hoạt cho MLP):
+    *   Giải thích: Hàm phi tuyến tính được sử dụng trong các lớp ẩn của MLP.
+    *   Giá trị ví dụ: `'relu'`.
+*   `dropout_rate` (Tỷ lệ dropout trong MLP):
+    *   Giải thích: Tỷ lệ dropout được áp dụng cho các lớp MLP để chống overfitting.
+    *   Giá trị ví dụ: `0.5`.
+
+---
+4. DRMM (Deep Relevance Matching Model)
+---
+DRMM là một mô hình tập trung vào việc so khớp (matching) ở cấp độ thuật ngữ (term-level) bằng cách sử dụng histogram của các tín hiệu tương tự.
+
+Các tham số được cấu hình trong `train_model.py`:
+*   `hist_bin_size` (Số lượng bin của histogram):
+    *   Giải thích: DRMM tính toán độ tương tự cosine giữa mỗi từ trong query và mỗi từ trong document. Các giá trị tương tự này (thường nằm trong khoảng [-1, 1]) sau đó được lượng tử hóa và nhóm vào các bin của một histogram. Ví dụ, nếu `hist_bin_size` là 30, thì khoảng [-1, 1] sẽ được chia thành 30 khoảng nhỏ (bin), và mô hình sẽ đếm xem có bao nhiêu cặp từ có độ tương tự rơi vào mỗi bin. Histogram này đóng vai trò là "matching signal" cho query, tóm tắt sự phân bố của các mức độ tương tự.
+    *   Giá trị ví dụ: `30`.
+*   `mlp_num_layers` (Số lớp MLP):
+    *   Giải thích: Số lớp trong mạng MLP (feed-forward network) nhận đầu vào là matching histogram (đã được xử lý) và đưa ra điểm relevancy cuối cùng.
+    *   Giá trị ví dụ: `1`.
+*   `mlp_num_units` (Số đơn vị trong các lớp MLP):
+    *   Giải thích: Số lượng neurons trong mỗi lớp ẩn của MLP này.
+    *   Giá trị ví dụ: `10`.
+*   `mlp_num_fan_out` (Số đơn vị lớp kế cuối MLP):
+    *   Giải thích: Số lượng neurons trong lớp ẩn ngay trước lớp output của MLP (lớp output thường có 1 neuron cho điểm relevancy).
+    *   Giá trị ví dụ: `1`.
+*   `mlp_activation_func` (Hàm kích hoạt cho MLP):
+    *   Giải thích: Hàm phi tuyến tính được sử dụng trong các lớp ẩn của MLP. 'tanh' là một lựa chọn phổ biến trong DRMM gốc.
+    *   Giá trị ví dụ: `'tanh'`.
+
+---
+5. MatchPyramid
+---
+MatchPyramid xây dựng một ma trận tương tác 2D giữa query và document, sau đó áp dụng các lớp CNN 2D và dynamic pooling để học các đặc trưng so khớp.
+
+Các tham số được cấu hình trong `train_model.py`:
+*   `kernel_count` (Số lượng kernel CNN 2D):
+    *   Giải thích: MatchPyramid đầu tiên xây dựng một ma trận tương tác (interaction matrix) 2D, trong đó mỗi phần tử (i, j) biểu diễn một loại độ tương tự (ví dụ: dot product, cosine similarity) giữa từ thứ i của query và từ thứ j của document. Sau đó, các lớp CNN 2D được áp dụng trên ma trận này để phát hiện các mẫu (patterns) so khớp. `kernel_count` là một danh sách, mỗi phần tử chỉ định số lượng kernel (feature maps) cho mỗi lớp CNN 2D tương ứng.
+    *   Giá trị ví dụ: `[16, 32]` (Lớp CNN 2D đầu tiên có 16 kernel, lớp thứ hai có 32 kernel).
+*   `kernel_size` (Kích thước kernel CNN 2D):
+    *   Giải thích: Danh sách các kích thước (ví dụ: `[height, width]`) của các kernel trong mỗi lớp CNN 2D. Ví dụ, `[3, 3]` có nghĩa là kernel có kích thước 3x3, trượt trên ma trận tương tác.
+    *   Giá trị ví dụ: `[[3, 3], [3, 3]]` (Cả hai lớp CNN 2D đều sử dụng kernel 3x3).
+*   `activation` (Hàm kích hoạt cho CNN):
+    *   Giải thích: Hàm phi tuyến tính được áp dụng sau mỗi lớp CNN 2D.
+    *   Giá trị ví dụ: `'relu'`.
+*   `dpool_size` (Kích thước dynamic pooling):
+    *   Giải thích: Sau các lớp CNN, kích thước của các feature maps có thể khác nhau tùy thuộc vào độ dài ban đầu của query và document (ảnh hưởng đến kích thước ma trận tương tác). Dynamic pooling (dpool) được sử dụng để giảm các feature maps này xuống một kích thước cố định trước khi đưa vào lớp MLP cuối cùng. `dpool_size` là một danh sách, xác định kích thước mục tiêu của pooling (ví dụ: `[pool_height, pool_width]`) cho mỗi chiều của feature map.
+    *   Giá trị ví dụ: `[3, 10]`.
+*   `dropout_rate` (Tỷ lệ dropout):
+    *   Giải thích: Tỷ lệ dropout được áp dụng trong các lớp fully connected (MLP) sau giai đoạn dynamic pooling để chống overfitting.
+    *   Giá trị ví dụ: `0.1`.
+
+---
+6. ConvKNRM (Convolutional Kernel-based Neural Ranking Model)
+---
+ConvKNRM kết hợp sức mạnh của CNN trong việc trích xuất các đặc trưng n-gram với cơ chế kernel pooling của KNRM để so khớp.
+
+Các tham số được cấu hình trong `train_model.py`:
+*   `filters` (Số lượng bộ lọc CNN 1D):
+    *   Giải thích: ConvKNRM sử dụng một lớp CNN 1D (áp dụng riêng cho query và document) để trích xuất các đặc trưng n-gram (local contextual features) từ chuỗi các word embeddings. `filters` là số lượng bộ lọc (feature maps) trong lớp CNN này. Mỗi bộ lọc học cách phát hiện một loại n-gram pattern cụ thể.
+    *   Giá trị ví dụ: `128`.
+*   `kernel_size` (Kích thước kernel CNN 1D):
+    *   Giải thích: Kích thước của cửa sổ trượt (kernel) trong lớp CNN 1D. Ví dụ, `kernel_size = 3` có nghĩa là CNN sẽ xem xét 3 từ (embeddings) liên tiếp cùng một lúc để tạo ra một đặc trưng.
+    *   Giá trị ví dụ: `3`.
+*   `conv_activation_func` (Hàm kích hoạt cho CNN):
+    *   Giải thích: Hàm phi tuyến tính được áp dụng sau lớp CNN 1D.
+    *   Giá trị ví dụ: `'tanh'`.
+*   `kernel_num` (Số lượng kernel RBF):
+    *   Giải thích: Tương tự như KNRM, sau khi các đặc trưng n-gram được trích xuất bởi CNN, ConvKNRM sử dụng một tập hợp các kernel RBF để so khớp các biểu diễn này giữa query và document. `kernel_num` xác định số lượng kernel RBF được sử dụng.
+    *   Giá trị ví dụ: `21`.
+*   `sigma` (Độ rộng của kernel RBF):
+    *   Giải thích: Tương tự như KNRM, tham số sigma kiểm soát độ "mềm" của các kernel RBF khi so khớp các đặc trưng n-gram đã được CNN trích xuất.
+    *   Giá trị ví dụ: `0.1`.
+*   `exact_sigma` (Sigma cho kernel exact match RBF):
+    *   Giải thích: Tương tự như KNRM, sigma cho kernel RBF được thiết kế để nắm bắt sự trùng khớp hoàn toàn giữa các đặc trưng n-gram.
+    *   Giá trị ví dụ: `0.001`.
+---
