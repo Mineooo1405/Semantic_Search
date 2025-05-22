@@ -67,13 +67,13 @@ def load_triplet_data_from_tsv(file_path):
 
 # --- Load CUSTOM Dataset ---
 print("Loading CUSTOM dataset.")
-train_file_path = r"D:\SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
-dev_file_path = r"D:\SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
-test_file_path = r"D:\SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" # Using dev for test
+TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
+DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
+TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" # Using dev for test
 
-source_train_data = load_triplet_data_from_tsv(train_file_path)
-source_dev_data = load_triplet_data_from_tsv(dev_file_path)
-source_test_data = load_triplet_data_from_tsv(test_file_path)
+source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
+source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
+source_test_data = load_triplet_data_from_tsv(TEST_FILE_PATH)
 
 # transformed_train_data = transform_to_matchzoo_format(source_train_data)
 # transformed_dev_data = transform_to_matchzoo_format(source_dev_data)
