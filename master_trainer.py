@@ -65,10 +65,10 @@ def modify_script_paths(script_path, train_file, dev_file, test_file):
             if stripped_line.startswith(var_name) and "=" in stripped_line:
                 parts = stripped_line.split("=", 1)
                 if parts[0].strip() == var_name:
-                    print(f"DEBUG: Matched variable {var_name} in line: {line.strip()}")
+                    # print(f"DEBUG: Matched variable {var_name} in line: {line.strip()}")
                     
                     current_normalized_path = str(new_path_value).replace('\\\\', '/')
-                    print(f"DEBUG: For {var_name}, attempting to set path to: {current_normalized_path}")
+                    # print(f"DEBUG: For {var_name}, attempting to set path to: {current_normalized_path}")
 
                     assignment_value_part = parts[1].strip()
                     raw_prefix = ""
@@ -78,19 +78,19 @@ def modify_script_paths(script_path, train_file, dev_file, test_file):
                     if assignment_value_part.startswith("r\\\"") and assignment_value_part.endswith("\\\""):
                         raw_prefix = "r"
                         quote_char = '\\\"' 
-                        print(f"DEBUG: Quoting style for {var_name}: r\\\"...\\\" (raw double quotes)")
+                        # print(f"DEBUG: Quoting style for {var_name}: r\\\"...\\\" (raw double quotes)")
                     elif assignment_value_part.startswith("\\\"") and assignment_value_part.endswith("\\\""):
                         quote_char = '\\\"'
-                        print(f"DEBUG: Quoting style for {var_name}: \\\"...\\\" (standard double quotes)")
+                        # print(f"DEBUG: Quoting style for {var_name}: \\\"...\\\" (standard double quotes)")
                     elif assignment_value_part.startswith("r\'") and assignment_value_part.endswith("\'"):
                         raw_prefix = "r"
                         quote_char = "\\\'"
-                        print(f"DEBUG: Quoting style for {var_name}: r\'...\' (raw single quotes)")
+                        # print(f"DEBUG: Quoting style for {var_name}: r\'...\' (raw single quotes)")
                     elif assignment_value_part.startswith("\'") and assignment_value_part.endswith("\'"):
                         quote_char = "\\\'"
-                        print(f"DEBUG: Quoting style for {var_name}: \'...\' (standard single quotes)")
+                        # print(f"DEBUG: Quoting style for {var_name}: \'...\' (standard single quotes)")
                     else:
-                        print(f"DEBUG: Quoting style for {var_name} NOT MATCHED. Assignment part: >>>{assignment_value_part}<<< Original line: >>>{line.strip()}<<<")
+                        # print(f"DEBUG: Quoting style for {var_name} NOT MATCHED. Assignment part: >>>{assignment_value_part}<<< Original line: >>>{line.strip()}<<<")
                         # If quoting is unusual or not a path string, skip modification for this line to be safe
                         continue 
 
@@ -98,7 +98,7 @@ def modify_script_paths(script_path, train_file, dev_file, test_file):
                     
                     indentation = line[:len(line) - len(line.lstrip())]
                     modified_line = indentation + new_line_content + "\\n"
-                    print(f"DEBUG: Replaced line for {var_name}: {modified_line.strip()}")
+                    # print(f"DEBUG: Replaced line for {var_name}: {modified_line.strip()}")
                     break 
         modified_content.append(modified_line)
     
@@ -128,19 +128,24 @@ def run_training_script(script_path, train_file, dev_file, test_file):
     try:
         with open(temp_script_path, 'w', encoding='utf-8') as f:
             f.write(modified_script_content)
-        print(f"DEBUG: Successfully wrote modified content to temporary file: {temp_script_path}")
+        # print(f"DEBUG: Successfully wrote modified content to temporary file: {temp_script_path}")
 
         # DEBUG: Optionally, read back and print a few lines from the temp file
-        try:
-            with open(temp_script_path, 'r', encoding='utf-8') as f_check:
-                print(f"\\nDEBUG: First 10 lines read back from temp file '{temp_script_path}':\\n" + "-"*30)
-                print("".join(f_check.readlines()[:10]))
-                print("-"*30 + "\\n")
-        except Exception as e_read_check:
-            print(f"DEBUG: Could not read back temp file for verification: {e_read_check}")
+        # try:
+        #     with open(temp_script_path, 'r', encoding='utf-8') as f_check:
+        #         print(f"\\\\nDEBUG: First 10 lines read back from temp file '{temp_script_path}':\\\\n" + "-"*30)
+        #         print("".join(f_check.readlines()[:10]))
+        #         print("-"*30 + "\\\\n")
+        # except Exception as e_read_check:
+        #     print(f"DEBUG: Could not read back temp file for verification: {e_read_check}")
 
-        print(f"Running modified temporary script: {temp_script_path}...")
-        process = subprocess.run([sys.executable, temp_script_path], capture_output=False, text=True, check=False)
+        project_root_dir = os.path.dirname(os.path.abspath(__file__))
+        print(f"Running modified temporary script: {temp_script_path} with cwd: {project_root_dir}...")
+        process = subprocess.run(
+            [sys.executable, temp_script_path],
+            capture_output=False, text=True, check=False,
+            cwd=project_root_dir  # Set current working directory
+        )
 
         if process.returncode == 0:
             print(f"Successfully completed training for {os.path.basename(script_path)}.")
@@ -160,7 +165,7 @@ def run_training_script(script_path, train_file, dev_file, test_file):
         if os.path.exists(temp_script_path):
             try:
                 os.remove(temp_script_path)
-                print(f"DEBUG: Successfully deleted temporary script: {temp_script_path}")
+                # print(f"DEBUG: Successfully deleted temporary script: {temp_script_path}")
             except Exception as e_del:
                 print(f"Warning: Could not delete temporary script {temp_script_path}: {e_del}")
         # Original script at script_path is not modified by this function.

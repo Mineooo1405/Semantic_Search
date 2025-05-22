@@ -7,7 +7,7 @@ import os # Added import
 
 # Define file paths
 # USER ACTION: Modify this path to point to your specific training data file.
-main_train_file_path = "D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_text-splitter_oie/train_1/msmarco_text-splitter_oie_train_train_mz.tsv"
+main_train_file_path = "D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
 
 # --- Derive output paths based on main_train_file_path ---
 _input_dir = os.path.dirname(main_train_file_path)

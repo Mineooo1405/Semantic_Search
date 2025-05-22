@@ -69,35 +69,42 @@ ranking_task.metrics = [
 ]
 print(f"`ranking_task` initialized with loss: {ranking_task.losses[0]} and metrics: {ranking_task.metrics}")
 
-# --- Helper function to load triplet data from TSV ---
-def load_triplet_data_from_tsv(file_path, delimiter='\t'): # Corrected delimiter
-    print(f"Loading triplet data from: {file_path} with delimiter '{delimiter}'")
-    pairs_data = []
+# --- Helper function to load data from qrels format (query, document, label) ---
+def load_data_from_qrels_format(file_path, delimiter='\t'): # Changed to '\\t' for tab
+    print(f"Loading qrels data from: {file_path} with delimiter '{repr(delimiter)}'") # Used repr for clarity
+    records = []
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
                 parts = line.strip().split(delimiter)
-                if len(parts) == 3: # query, positive_doc, negative_doc
-                    query, pos_doc, neg_doc = parts[0], parts[1], parts[2]
-                    pairs_data.append({'text_left': query, 'text_right': pos_doc, 'label': 1}) # Positive pair
-                    pairs_data.append({'text_left': query, 'text_right': neg_doc, 'label': 0}) # Negative pair
+                if len(parts) == 3: # query, document, label
+                    query, doc, label_str = parts[0], parts[1], parts[2]
+                    try:
+                        label = int(label_str)
+                        # MatchZoo's Ranking task typically expects 0 for non-relevant, 1 for relevant.
+                        if label not in (0, 1):
+                            print(f"Warning: Line {i+1}: Label '{label_str}' is not 0 or 1. Treating as 0 (non-relevant). Modify if other behavior is desired.")
+                            label = 0 
+                        records.append({'text_left': query, 'text_right': doc, 'label': label})
+                    except ValueError:
+                        print(f"Skipping line {i+1} due to non-integer label: {label_str}")
                 else:
                     print(f"Skipping malformed line {i+1} (expected 3 parts, got {len(parts)}): {line.strip()}")
     except FileNotFoundError:
         print(f"Error: File not found at {file_path}")
-        return []
+        return [] 
     except Exception as e:
         print(f"Error reading or processing file {file_path}: {e}")
         return []
-    print(f"Loaded {len(pairs_data)} pairs from {len(pairs_data)//2 if pairs_data else 0} triplets in {file_path}")
-    return pairs_data
+    print(f"Loaded {len(records)} query-document-label records from {file_path}")
+    return records
 
 # --- Load CUSTOM Dataset ---
-print("Loading CUSTOM dataset...")
+print("Loading CUSTOM dataset (query, document, label format)...")
 # The TRAIN_FILE_PATH, DEV_FILE_PATH, TEST_FILE_PATH will be set by the master script
-source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
-source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
-source_test_data = load_triplet_data_from_tsv(TEST_FILE_PATH)
+source_train_data = load_data_from_qrels_format(TRAIN_FILE_PATH)
+source_dev_data = load_data_from_qrels_format(DEV_FILE_PATH) # Dev data should also be in qrels format
+source_test_data = load_data_from_qrels_format(TEST_FILE_PATH) # Test data should also be in qrels format
 
 if not source_train_data:
     print("CRITICAL: Training data is empty. Exiting.")
@@ -257,8 +264,14 @@ def safe_get_param_value(params_table, key, default_val):
 
 # --- Training ---
 print(f"Starting ConvKNRM model training for {EPOCHS} epochs...")
-trainer.run()
-print("Training finished.")
+try:
+    trainer.run()
+except Exception as e:
+    print(f"CRITICAL ERROR during trainer.run(): {e}")
+    import traceback
+    traceback.print_exc()
+    # sys.exit(1) # Optionally exit
+print("Training finished or error occurred.")
 
 # --- Save Model and Preprocessor ---
 print(f"Saving model to: {MODEL_SAVE_PATH}")

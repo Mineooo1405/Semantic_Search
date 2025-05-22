@@ -4,10 +4,20 @@ import pandas as pd
 import matchzoo as mz
 import nltk
 import os
+import sys # ADDED
 from pathlib import Path
 import json # ADDED for saving config
-from Tool.transform_data import transform_to_matchzoo_format
+# from Tool.transform_data import transform_to_matchzoo_format # Moved down
 from datetime import datetime # ADDED for saving config
+
+# --- Add project root to sys.path ---
+# This ensures that modules in the project root (like 'Tool') can be found.
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+# --- End of sys.path modification ---
+
+from Tool.transform_data import transform_to_matchzoo_format # MOVED HERE
 
 print(f"MatchZoo version: {mz.__version__}")
 print(f"PyTorch version: {torch.__version__}")
