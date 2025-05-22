@@ -1,11 +1,15 @@
-import torch
-import numpy as np
-import pandas as pd
 import matchzoo as mz
 import nltk
+import pandas as pd
+import numpy as np
+import torch
 import os
 from pathlib import Path
-from transform_data import transform_to_matchzoo_format
+import json # Added for saving config
+import sys # Added
+import shutil # Added for rmtree
+
+# from transform_data import transform_to_matchzoo_format # Removed unused import
 
 print(f"MatchZoo version: {mz.__version__}")
 print(f"PyTorch version: {torch.__version__}")
@@ -13,17 +17,18 @@ print(f"NumPy version: {np.__version__}")
 print(f"Pandas version: {pd.__version__}")
 
 # --- Script Configuration ---
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_triplets.tsv"
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv"
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv" # Using dev for test
+TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv" # Placeholder, will be replaced by master script
+DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" # Placeholder, will be replaced by master script
+TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" # Placeholder, will be replaced by master script
 
 EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt"
 EMBEDDING_DIMENSION = 100 # Should match the GloVe file used
 
 OUTPUT_DIR = Path("D:/SemanticSearch/trained_convknrm_model")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_SAVE_PATH = OUTPUT_DIR / "convknrm_model.pt"
-PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "convknrm_preprocessor.dill"
+MODEL_SAVE_PATH = OUTPUT_DIR / "model.pt"
+PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "preprocessor.dill"
+CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json" # ADDED for saving config
 
 # ConvKNRM specific parameters (from conv_knrm.ipynb)
 BATCH_SIZE = 20
@@ -52,7 +57,7 @@ except LookupError:
         print(f"'punkt' tokenizer downloaded to {nltk_data_dir} or already available there.")
     except Exception as e:
         print(f"Failed to download 'punkt': {e}. Please ensure NLTK can download data or install 'punkt' manually.")
-        exit(1)
+        sys.exit(1) # Changed to sys.exit
 
 # --- Task Definition (from init.ipynb, used by conv_knrm.ipynb) ---
 print("Defining ranking task for ConvKNRM...")
@@ -65,56 +70,67 @@ ranking_task.metrics = [
 print(f"`ranking_task` initialized with loss: {ranking_task.losses[0]} and metrics: {ranking_task.metrics}")
 
 # --- Helper function to load triplet data from TSV ---
-def load_triplet_data_from_tsv(file_path, delimiter='\t'):
+def load_triplet_data_from_tsv(file_path, delimiter='\t'): # Corrected delimiter
     print(f"Loading triplet data from: {file_path} with delimiter '{delimiter}'")
-    data = []
+    pairs_data = []
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
                 parts = line.strip().split(delimiter)
-                if len(parts) == 3:
-                    data.append(parts)
+                if len(parts) == 3: # query, positive_doc, negative_doc
+                    query, pos_doc, neg_doc = parts[0], parts[1], parts[2]
+                    pairs_data.append({'text_left': query, 'text_right': pos_doc, 'label': 1}) # Positive pair
+                    pairs_data.append({'text_left': query, 'text_right': neg_doc, 'label': 0}) # Negative pair
                 else:
-                    print(f"Skipping malformed line #{i+1} (expected 3 columns, got {len(parts)}): {line.strip()}")
-        print(f"Loaded {len(data)} triplets from {file_path}.")
-        if not data:
-            print(f"WARNING: No data loaded from {file_path}. Check the file format and delimiter.")
-        return data
+                    print(f"Skipping malformed line {i+1} (expected 3 parts, got {len(parts)}): {line.strip()}")
     except FileNotFoundError:
-        print(f"ERROR: File not found: {file_path}")
+        print(f"Error: File not found at {file_path}")
         return []
     except Exception as e:
-        print(f"ERROR: Could not read file {file_path}: {e}")
+        print(f"Error reading or processing file {file_path}: {e}")
         return []
+    print(f"Loaded {len(pairs_data)} pairs from {len(pairs_data)//2 if pairs_data else 0} triplets in {file_path}")
+    return pairs_data
 
 # --- Load CUSTOM Dataset ---
 print("Loading CUSTOM dataset...")
+# The TRAIN_FILE_PATH, DEV_FILE_PATH, TEST_FILE_PATH will be set by the master script
 source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
 source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
 source_test_data = load_triplet_data_from_tsv(TEST_FILE_PATH)
 
 if not source_train_data:
     print("CRITICAL: Training data is empty. Exiting.")
-    exit(1)
+    sys.exit(1) # Changed to sys.exit
 if not source_dev_data:
     print("CRITICAL: Development/Validation data is empty. Exiting.")
-    exit(1)
+    sys.exit(1) # Changed to sys.exit
 
-transformed_train_data = transform_to_matchzoo_format(source_train_data)
-transformed_dev_data = transform_to_matchzoo_format(source_dev_data)
-transformed_test_data = transform_to_matchzoo_format(source_test_data)
+# The load_triplet_data_from_tsv function now returns a list of dicts with 'text_left', 'text_right', 'label'
+train_df = pd.DataFrame(source_train_data)
+dev_df = pd.DataFrame(source_dev_data)
+test_df = pd.DataFrame(source_test_data) if source_test_data else pd.DataFrame(columns=['text_left', 'text_right', 'label'])
 
-train_df = pd.DataFrame(transformed_train_data, columns=['text_left', 'text_right', 'label'])
-dev_df = pd.DataFrame(transformed_dev_data, columns=['text_left', 'text_right', 'label'])
-test_df = pd.DataFrame(transformed_test_data, columns=['text_left', 'text_right', 'label'])
+# Ensure dataframes are not empty before packing
+if train_df.empty:
+    print("CRITICAL: Training DataFrame is empty. Exiting.")
+    sys.exit(1) # Changed to sys.exit
+if dev_df.empty:
+    print("CRITICAL: Development DataFrame is empty. Exiting.")
+    sys.exit(1) # Changed to sys.exit
 
 train_pack_raw = mz.pack(train_df, task=ranking_task)
 dev_pack_raw = mz.pack(dev_df, task=ranking_task)
-test_pack_raw = mz.pack(test_df, task=ranking_task)
+
+if not test_df.empty:
+    test_pack_raw = mz.pack(test_df, task=ranking_task)
+else:
+    print("WARNING: Test DataFrame is empty. Using dev_pack_raw for test_pack_raw.")
+    test_pack_raw = dev_pack_raw
 
 print(f"Train DataPack created with {len(train_pack_raw)} entries.")
 print(f"Dev (Validation) DataPack created with {len(dev_pack_raw)} entries.")
-print(f"Test DataPack created with {len(test_pack_raw)} entries.")
+print(f"Test DataPack created with {len(test_pack_raw)} entries (may be using dev data if original test was empty).")
 
 # --- Preprocessing (from conv_knrm.ipynb) ---
 print("Preprocessing data for ConvKNRM...")
@@ -213,6 +229,32 @@ trainer = mz.trainers.Trainer(
 )
 print("Trainer setup complete.")
 
+# --- Helper function to safely get parameter values (from MatchLSTM script) ---
+def safe_get_param_value(params_table, key, default_val):
+    if isinstance(params_table, mz.engine.param_table.ParamTable):
+        # For MatchZoo ParamTable, __getitem__ (e.g., params_table[key]) returns the actual value.
+        # .get() returns the Param object.
+        if key in params_table:
+            return params_table[key]  # Correctly fetches the value
+        else:
+            return default_val
+    # Fallback for general dictionary-like objects if params_table is not a ParamTable
+    elif hasattr(params_table, 'get') and callable(getattr(params_table, 'get')):
+        return params_table.get(key, default_val) # Standard dict.get()
+    # Fallback for attribute access (less likely for this specific use case with model.params)
+    elif hasattr(params_table, key):
+        ret_attr = getattr(params_table, key, default_val)
+        # Handle cases where getattr might still return a Param-like wrapper from a non-ParamTable object
+        # This is a heuristic check.
+        if default_val != ret_attr and type(ret_attr) != type(default_val) and hasattr(ret_attr, 'value'):
+             # Avoid calling .value on primitive types or if .value is callable (method)
+            if not isinstance(ret_attr.value, (type(None), bool, int, float, str, list, dict)) and callable(ret_attr.value):
+                pass # it's a method, not a value attribute we want
+            elif type(ret_attr) != type(ret_attr.value): # Check if it's indeed a wrapper
+                return ret_attr.value
+        return ret_attr
+    return default_val
+
 # --- Training ---
 print(f"Starting ConvKNRM model training for {EPOCHS} epochs...")
 trainer.run()
@@ -221,9 +263,120 @@ print("Training finished.")
 # --- Save Model and Preprocessor ---
 print(f"Saving model to: {MODEL_SAVE_PATH}")
 torch.save(model.state_dict(), MODEL_SAVE_PATH)
-print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}")
-preprocessor.save(PREPROCESSOR_SAVE_PATH)
 
-print("ConvKNRM training script finished successfully.")
-print(f"Model saved at: {MODEL_SAVE_PATH}")
-print(f"Preprocessor saved at: {PREPROCESSOR_SAVE_PATH}")
+# --- Save Preprocessor (handling MatchZoo's directory creation) ---
+# Define a temporary path for MatchZoo to save, which might be a directory
+TEMP_PREPROCESSOR_PATH = OUTPUT_DIR / "temp_preprocessor_save"
+ACTUAL_PREPROCESSOR_FILE_INSIDE_TEMP = TEMP_PREPROCESSOR_PATH / "preprocessor.dill" # Common pattern for mz
+
+print(f"Attempting to save preprocessor via MatchZoo to a temporary location: {TEMP_PREPROCESSOR_PATH}")
+preprocessor.save(TEMP_PREPROCESSOR_PATH)
+
+# Check if MatchZoo created a directory with preprocessor.dill inside
+if TEMP_PREPROCESSOR_PATH.is_dir() and ACTUAL_PREPROCESSOR_FILE_INSIDE_TEMP.is_file():
+    print(f"MatchZoo created a directory. Moving {ACTUAL_PREPROCESSOR_FILE_INSIDE_TEMP} to {PREPROCESSOR_SAVE_PATH}")
+    # Ensure the target directory exists (it should, from OUTPUT_DIR.mkdir)
+    PREPROCESSOR_SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # If PREPROCESSOR_SAVE_PATH already exists and is a directory (from a previous failed run), remove it
+    if PREPROCESSOR_SAVE_PATH.is_dir():
+        print(f"Removing existing directory at target preprocessor path: {PREPROCESSOR_SAVE_PATH}")
+        shutil.rmtree(PREPROCESSOR_SAVE_PATH)
+    elif PREPROCESSOR_SAVE_PATH.is_file():
+        print(f"Removing existing file at target preprocessor path: {PREPROCESSOR_SAVE_PATH}")
+        PREPROCESSOR_SAVE_PATH.unlink()
+
+    shutil.move(str(ACTUAL_PREPROCESSOR_FILE_INSIDE_TEMP), str(PREPROCESSOR_SAVE_PATH))
+    print(f"Preprocessor moved to: {PREPROCESSOR_SAVE_PATH}")
+    # Clean up the temporary directory structure created by MatchZoo
+    try:
+        shutil.rmtree(TEMP_PREPROCESSOR_PATH)
+        print(f"Cleaned up temporary directory: {TEMP_PREPROCESSOR_PATH}")
+    except OSError as e:
+        print(f"Warning: Could not remove temporary directory {TEMP_PREPROCESSOR_PATH}: {e}")
+elif TEMP_PREPROCESSOR_PATH.is_file(): # If it saved directly as a file (less likely based on behavior)
+    print(f"MatchZoo saved preprocessor directly as a file. Moving {TEMP_PREPROCESSOR_PATH} to {PREPROCESSOR_SAVE_PATH}")
+    # Ensure the target directory exists
+    PREPROCESSOR_SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if PREPROCESSOR_SAVE_PATH.is_dir():
+        shutil.rmtree(PREPROCESSOR_SAVE_PATH)
+    elif PREPROCESSOR_SAVE_PATH.is_file():
+        PREPROCESSOR_SAVE_PATH.unlink()
+        
+    shutil.move(str(TEMP_PREPROCESSOR_PATH), str(PREPROCESSOR_SAVE_PATH))
+    print(f"Preprocessor moved to: {PREPROCESSOR_SAVE_PATH}")
+else:
+    print(f"Warning: Preprocessor saving did not result in an expected file/directory at {TEMP_PREPROCESSOR_PATH}. Check MatchZoo behavior.")
+    print(f"Saving preprocessor directly to intended path: {PREPROCESSOR_SAVE_PATH} as a fallback.")
+    # Fallback: try saving directly to the final intended path if the temp logic failed unexpectedly
+    # This might recreate the nested folder issue if MatchZoo insists, but it's a fallback.
+    if PREPROCESSOR_SAVE_PATH.is_dir(): # If it's a dir from a previous attempt, remove it
+        shutil.rmtree(PREPROCESSOR_SAVE_PATH)
+    preprocessor.save(PREPROCESSOR_SAVE_PATH)
+
+
+# --- Save Configuration ---
+print(f"Saving configuration to: {CONFIG_SAVE_PATH}")
+config_to_save = {
+    "model_name": "ConvKNRM",
+    "model_class": model.__class__.__name__,
+    "task_type": model.params['task'].__class__.__name__ if model.params['task'] else None,
+    "loss_function_class": model.params['task'].loss.__class__.__name__ if model.params['task'] and hasattr(model.params['task'], 'loss') else None,
+    # For RankHingeLoss, num_neg is not directly on the loss object in the same way as RankCrossEntropyLoss
+    # It's often handled by the DataLoader (num_neg=1 in this script's trainset)
+    # We can record the dataloader's num_neg if that's the intended information
+    "dataloader_num_neg_for_loss_effect": trainset._num_neg if hasattr(trainset, '_num_neg') else None,
+    "optimizer_class": optimizer.__class__.__name__,
+    "learning_rate": optimizer.defaults.get('lr'),
+    "model_hyperparameters_used": {
+        "filters": safe_get_param_value(model.params, 'filters', FILTERS),
+        "conv_activation_func": safe_get_param_value(model.params, 'conv_activation_func', CONV_ACTIVATION_FUNC),
+        "max_ngram": safe_get_param_value(model.params, 'max_ngram', MAX_NGRAM),
+        "use_crossmatch": safe_get_param_value(model.params, 'use_crossmatch', USE_CROSSMATCH),
+        "kernel_num": safe_get_param_value(model.params, 'kernel_num', KERNEL_NUM),
+        "sigma": safe_get_param_value(model.params, 'sigma', SIGMA),
+        "exact_sigma": safe_get_param_value(model.params, 'exact_sigma', EXACT_SIGMA),
+        "mask_value": safe_get_param_value(model.params, 'mask_value', 0), # BasicModel default
+        "embedding_input_dim_model_param": safe_get_param_value(model.params, 'embedding_input_dim', None),
+        "embedding_output_dim_model_param": safe_get_param_value(model.params, 'embedding_output_dim', None)
+    },
+    "embedding_source_file": EMBEDDING_FILE_PATH if 'EMBEDDING_FILE_PATH' in globals() and os.path.exists(EMBEDDING_FILE_PATH) else "random_dummy_embeddings",
+    "embedding_dim_used": EMBEDDING_DIMENSION,
+    "batch_size": BATCH_SIZE,
+    "epochs_configured": EPOCHS,
+    "epochs_completed": trainer._epoch if hasattr(trainer, '_epoch') else 0,
+    "patience_used": trainer._early_stopping.patience if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'patience') else None,
+    "validate_interval": trainer._validate_interval if hasattr(trainer, '_validate_interval') else None,
+    "early_stopping_key": trainer._early_stopping.key if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'key') else None,
+    "device_used_for_training": str(trainer._device) if hasattr(trainer, '_device') else None,
+    "start_epoch_configured": trainer._start_epoch if hasattr(trainer, '_start_epoch') else 1,
+    "gradient_clip_norm": trainer._clip_norm if hasattr(trainer, '_clip_norm') else None, # CLIP_NORM is defined
+    "scheduler_class": trainer._scheduler.__class__.__name__ if hasattr(trainer, '_scheduler') and trainer._scheduler is not None else None,
+    "scheduler_step_size": SCHEDULER_STEP_SIZE if hasattr(trainer, '_scheduler') and isinstance(trainer._scheduler, torch.optim.lr_scheduler.StepLR) else None,
+    "trainer_save_directory": str(trainer._save_dir.resolve()) if hasattr(trainer, '_save_dir') and trainer._save_dir is not None else None,
+    "trainer_save_all_flag": trainer._save_all if hasattr(trainer, '_save_all') else False,
+    "trainer_verbose_level": trainer._verbose if hasattr(trainer, '_verbose') else 1,
+    "fixed_length_left": preprocessor.context.get('fixed_length_left'),
+    "fixed_length_right": preprocessor.context.get('fixed_length_right'),
+    "vocab_size_from_preprocessor_context": preprocessor.context.get('vocab_size'),
+    "embedding_input_dim_from_preprocessor_context": preprocessor.context.get('embedding_input_dim'),
+    "matchzoo_version": mz.__version__,
+    "training_script": os.path.basename(__file__),
+    "training_date": pd.Timestamp.now().isoformat()
+}
+
+# Ensure all values in model_hyperparameters_used are serializable
+for key, value in config_to_save.get("model_hyperparameters_used", {}).items():
+    if isinstance(value, np.integer):
+        config_to_save["model_hyperparameters_used"][key] = int(value)
+    elif isinstance(value, np.floating):
+        config_to_save["model_hyperparameters_used"][key] = float(value)
+    elif isinstance(value, np.ndarray):
+        config_to_save["model_hyperparameters_used"][key] = value.tolist()
+    elif not isinstance(value, (str, int, float, bool, list, dict, type(None))):
+        config_to_save["model_hyperparameters_used"][key] = str(value)
+
+with open(CONFIG_SAVE_PATH, 'w') as f:
+    json.dump(config_to_save, f, indent=4)
+print(f"Configuration saved to {CONFIG_SAVE_PATH}")
+
+print("ConvKNRM training script finished.") # Added to signify end

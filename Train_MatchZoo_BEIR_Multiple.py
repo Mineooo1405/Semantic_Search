@@ -1,24 +1,49 @@
 import pandas as pd
 import nltk
-import os # Ensure os is imported
-import re # Ensure re is imported
+import os
+import re
 from tqdm.auto import tqdm
 from beir import util
 from beir.datasets.data_loader import GenericDataLoader
 from typing import List, Tuple, Dict, Callable, Optional, Union
-import concurrent.futures
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import torch
+import torch_directml
+import atexit
+import json
 import functools
+import random
 import traceback
-import atexit # Ensure atexit is imported
+from sklearn.model_selection import train_test_split
+import datetime # ADDED for logging timestamps
+
 from Semantic_Grouping import semantic_chunk_passage_from_grouping_logic
 from Semantic_Splitter import chunk_passage_semantic_splitter
 from Text_Splitter import chunk_passage_text_splitter    
 # Sửa đổi import nếu OIE.py đã tích hợp caching vào extract_triples
 from Tool.OIE import extract_relations_from_paragraph, close_oie_clients # MODIFIED OIE import
-import torch # Thêm import này ở đầu file nếu chưa có
-import torch_directml # Thêm import này ở đầu file nếu chưa có
-import json # Add this line
-import random # Add this line
+
+# Global variable for the main process DirectML device
+MAIN_PROCESS_DML_DEVICE = None
+# Global variable for worker-specific device, will be set by init_worker_directml
+DML_WORKER_DEVICE = None
+
+try:
+    if torch_directml.is_available() and hasattr(torch_directml, 'device') and callable(torch_directml.device):
+        MAIN_PROCESS_DML_DEVICE = torch_directml.device()
+        print(f"Main process: DirectML device enabled: {MAIN_PROCESS_DML_DEVICE}")
+    else:
+        print("Main process: DirectML not available or torch_directml.device() not found. Falling back to CPU or other PyTorch default.")
+        if torch.cuda.is_available():
+            MAIN_PROCESS_DML_DEVICE = torch.device('cuda')
+            print(f"Main process: Using CUDA device: {MAIN_PROCESS_DML_DEVICE}")
+        else:
+            MAIN_PROCESS_DML_DEVICE = torch.device('cpu')
+            print(f"Main process: Using CPU device: {MAIN_PROCESS_DML_DEVICE}")
+except Exception as e:
+    print(f"Main process: Error initializing DirectML or fallback device: {e}. Defaulting to CPU.")
+    MAIN_PROCESS_DML_DEVICE = torch.device('cpu')
+
 
 # Đăng ký hàm để được gọi khi script thoát
 atexit.register(close_oie_clients) # <<< THÊM DÒNG NÀY
@@ -168,89 +193,84 @@ def get_split_type() -> str:
             print("Invalid input. Please enter 'train' or 'test'.")
 
 # --- Worker Function for Parallel Chunking ---
-def init_worker():
-    """Initializer for each worker process."""
-    global dml_device_worker
+# Note: Please ensure any duplicate init_worker functions are removed.
+# The ProcessPoolExecutor should be initialized with initializer=init_worker_directml
+
+def init_worker_directml():
+    """Initializer for each worker process to set up DirectML device."""
+    global DML_WORKER_DEVICE # This global is specific to each worker process
     try:
-        # Cố gắng import và lấy thiết bị trong worker
-        # Điều này đảm bảo mỗi worker nhận biết được DirectML
+        # Ensure torch and torch_directml are accessible in the worker
         import torch
         import torch_directml
-        dml_device_worker = torch_directml.device()
-        print(f"Worker {os.getpid()} initialized with DML device: {dml_device_worker}")
+        if torch_directml.is_available() and hasattr(torch_directml, 'device') and callable(torch_directml.device):
+            DML_WORKER_DEVICE = torch_directml.device()
+            # print(f"Worker {os.getpid()} initialized. Using DirectML device: {DML_WORKER_DEVICE}")
+        else:
+            # print(f"Worker {os.getpid()}: DirectML not available or torch_directml.device() not found. Trying CPU/CUDA.")
+            if torch.cuda.is_available():
+                DML_WORKER_DEVICE = torch.device('cuda')
+                # print(f"Worker {os.getpid()}: Using CUDA device: {DML_WORKER_DEVICE}")
+            else:
+                DML_WORKER_DEVICE = torch.device('cpu')
+                # print(f"Worker {os.getpid()}: Using CPU device: {DML_WORKER_DEVICE}")
     except Exception as e:
-        print(f"Worker {os.getpid()} failed to initialize DML device: {e}")
-        dml_device_worker = None # Hoặc đặt là 'cpu'
-
-def init_worker():
-    """Initializer for each worker process."""
-    # global dml_device_worker # Không cần thiết nếu không sử dụng trực tiếp biến global này
-    try:
-        import torch # Đảm bảo import trong worker
-        import torch_directml # Đảm bảo import trong worker
-        dml_device = torch_directml.device()
-        # print(f"Worker {os.getpid()} initialized with DML device: {dml_device}") # Bỏ comment nếu cần debug
-    except Exception as e:
-        print(f"Worker {os.getpid()} failed to initialize DML device: {e}")
-        # dml_device_worker = None # Không cần gán vào biến global
+        print(f"Worker {os.getpid()} error during DirectML/device setup: {e}. Defaulting to CPU.")
+        DML_WORKER_DEVICE = torch.device('cpu')
 
 def chunk_document_worker(
     doc_item: Tuple[str, Dict],
     chunking_func: Callable,
     params: Dict
-) -> Tuple[str, List[Tuple[str, str, Optional[str]]]]: # Đảm bảo kiểu trả về nhất quán
+) -> Optional[Tuple[str, List[Tuple[str, str, Optional[str]]]]]: # Ensure return type matches usage
     doc_id, doc_data = doc_item
     try:
+        # DML_WORKER_DEVICE is set by init_worker_directml for this worker process.
+        # Add this device to the params passed to the actual chunking function.
+        # Chunking functions (e.g., semantic_grouping, semantic_splitter) must be
+        # updated to accept 'device' in **kwargs and pass it to their embedding calls.
+        worker_params = params.copy()
+        worker_params['device'] = DML_WORKER_DEVICE # DML_WORKER_DEVICE is global *within this worker*
+
         passage_text = doc_data.get("text", "")
         title = doc_data.get("title", "")
         full_text_to_chunk = f"{title}. {passage_text}" if title and passage_text else passage_text or title
 
         if not full_text_to_chunk.strip():
-            return doc_id, []
+            # print(f"Skipping document {doc_id} due to empty content after combining title and text.") # Optional: log skips
+            return (doc_id, []) # Return doc_id and empty list if no content
 
-        # Gọi hàm chunking gốc
-        # Các hàm semantic_grouping và semantic_splitter đã trả về List[Tuple[str, str, Optional[str]]]
-        # Hàm text_splitter trả về List[List[Tuple[str, str, Optional[str]]]]
-        raw_doc_chunks_result = chunking_func(doc_id, full_text_to_chunk, **params)
+        # --- ADDED DETAILED LOGGING ---
+        current_time_start = datetime.datetime.now().isoformat()
+        oie_active = params.get('include_oie', False)
+        print(f"[{current_time_start}] Worker {os.getpid()} STARTING chunking for doc_id: {doc_id} using {chunking_func.__name__} (OIE: {oie_active})", flush=True)
+        
+        raw_doc_chunks_result = chunking_func(doc_id, full_text_to_chunk, **worker_params)
+        
+        current_time_done = datetime.datetime.now().isoformat()
+        num_chunks_generated = len(raw_doc_chunks_result) if isinstance(raw_doc_chunks_result, list) else 'N/A (or error)'
+        print(f"[{current_time_done}] Worker {os.getpid()} COMPLETED chunking for doc_id: {doc_id}. Chunks: {num_chunks_generated}", flush=True)
+        # --- END DETAILED LOGGING ---
 
-        # Xử lý kết quả để đảm bảo nó luôn là List[Tuple[str, str, Optional[str]]]
-        # Điều này đặc biệt quan trọng cho text_splitter
         final_doc_chunks: List[Tuple[str, str, Optional[str]]] = []
-        if chunking_func == chunk_passage_text_splitter:
-            # text_splitter trả về [[(id, text, oie), ...]] hoặc [[]]
-            if raw_doc_chunks_result and isinstance(raw_doc_chunks_result, list) and len(raw_doc_chunks_result) > 0:
-                final_doc_chunks = raw_doc_chunks_result[0] # Lấy list bên trong
-            else: # Trường hợp trả về [[]] hoặc một cấu trúc không mong muốn
-                final_doc_chunks = []
-        else: # Các hàm chunking khác đã trả về đúng định dạng
-            final_doc_chunks = raw_doc_chunks_result if raw_doc_chunks_result else []
+        if raw_doc_chunks_result and isinstance(raw_doc_chunks_result, list):
+            # Assuming chunking_func already returns the correct flat list format
+            # List[Tuple[str, str, Optional[str]]]
+            final_doc_chunks = raw_doc_chunks_result
+        # else:
+            # print(f"Warning: Unexpected or empty result from {chunking_func.__name__} for {doc_id}")
 
 
-        # Logic OIE được áp dụng sau khi đã có final_doc_chunks
-        # Lưu ý: Hiện tại, các hàm chunking semantic đã có logic OIE bên trong.
-        # Nếu bạn muốn logic OIE chung ở đây, cần xem xét lại.
-        # Đoạn code OIE dưới đây giả định final_doc_chunks là List[Tuple[chunk_id, chunk_text]]
-        # và cần được điều chỉnh nếu final_doc_chunks đã chứa OIE.
-        # Hiện tại, các hàm chunking semantic đã trả về (chunk_id, chunk_text, oie_str)
-        # nên không cần xử lý OIE thêm ở đây nữa nếu include_oie đã được truyền vào params.
-
-        # if params.get('include_oie', False) and final_doc_chunks:
-        #     processed_doc_chunks_with_oie = []
-        #     for chunk_id, chunk_text, _ in final_doc_chunks: # Giả sử final_doc_chunks có 3 phần tử
-        #         # Nếu OIE đã được thêm bởi hàm chunking, không cần làm lại
-        #         # Nếu không, bạn có thể gọi get_chunk_text_with_oie ở đây
-        #         # augmented_chunk_text = get_chunk_text_with_oie(chunk_text, include_oie=True)
-        #         # processed_doc_chunks_with_oie.append((chunk_id, augmented_chunk_text, existing_oie_str))
-        #         # Tạm thời giữ nguyên vì các hàm chunking đã xử lý OIE
-        #         pass
-        #     # final_doc_chunks = processed_doc_chunks_with_oie # Cập nhật nếu có xử lý OIE ở đây
+        if not final_doc_chunks:
+            # print(f"No chunks generated for document {doc_id} by {chunking_func.__name__}")
+            return doc_id, []
 
         return doc_id, final_doc_chunks
 
     except Exception as e:
-        print(f"Error processing document {doc_id} in worker: {e}")
+        print(f"Error processing document {doc_id} in worker {os.getpid()}: {e}")
         traceback.print_exc()
-        return doc_id, []
+        return doc_id, [] # Return empty list on error
 
 # --- Helper Functions ---
 def clean_text(text):
@@ -274,44 +294,7 @@ def find_next_run_dir(base_output_dir: str, split_prefix: str) -> str:
         counter += 1
 
 # --- OIE Helper Functions ---
-def format_oie_triples_to_string(triples_list: List[Dict[str, str]]) -> str:
-    if not triples_list:
-        return ""
-    formatted_triples = []
-    for triple in triples_list:
-        s = str(triple.get('subject', '')).replace('\t', ' ').replace('\n', ' ').strip()
-        r = str(triple.get('relation', '')).replace('\t', ' ').replace('\n', ' ').strip()
-        o = str(triple.get('object', '')).replace('\t', ' ').replace('\n', ' ').strip()
-        if s and r and o: # Only include complete triples
-            formatted_triples.append(f"({s}; {r}; {o})")
-    if not formatted_triples:
-        return ""
-    return " [OIE_TRIPLES] " + " | ".join(formatted_triples) + " [/OIE_TRIPLES]"
-
-def get_chunk_text_with_oie(chunk_text: str, include_oie: bool) -> str:
-    if not include_oie or not chunk_text.strip():
-        return chunk_text
-    
-    try:
-        # Call the updated function from Tool.OIE, 
-        # using enhanced_settings as per previous logic.
-        relations = extract_relations_from_paragraph(chunk_text, use_enhanced_settings=True) 
-        
-        if relations:
-            oie_string = format_oie_triples_to_string(relations)
-            # Append OIE string only if it's not empty
-            if oie_string: 
-                return f"{chunk_text}{oie_string}"
-        # If no relations were extracted or the formatted string is empty,
-        # fall through to return the original chunk_text.
-            
-    except Exception as e_chunk_oie:
-        # Log the error with some context from the chunk
-        print(f"[ERROR OIE] Error during OIE extraction for chunk starting with '{chunk_text[:50]}...': {e_chunk_oie}")
-        # In case of an error during OIE, return the original chunk_text
-        pass 
-    
-    return chunk_text
+# (Removed format_oie_triples_to_string and get_chunk_text_with_oie as OIE is now handled by individual chunking scripts)
 # --- End OIE Helper Functions ---
 
 # --- ĐẶT TOÀN BỘ LOGIC CHÍNH VÀO ĐÂY ---
@@ -320,7 +303,12 @@ if __name__ == "__main__":
     # --- Get Configuration from User ---
     common_config = get_common_params()
     selected_method = select_chunking_method()
-    split_type = get_split_type() 
+    split_type = get_split_type()
+
+    # --- Assign config values to variables ---
+    MAX_DOCS_TO_PROCESS = common_config.get('max_docs')
+    RANDOM_SEED = common_config['random_seed'] # This will be used for train_test_split
+    MAX_TRIPLETS_TO_GENERATE = common_config.get('max_triplets')
 
     method_params = {}
     if selected_method == 'semantic_grouping':
@@ -330,115 +318,99 @@ if __name__ == "__main__":
     elif selected_method == 'text_splitter':
         method_params = get_text_splitter_params()
     
-    # Quan trọng: Thêm cờ include_oie vào method_params để worker có thể truy cập
     method_params['include_oie'] = common_config.get('include_oie', False)
-    if selected_method != 'text_splitter': # text_splitter không dùng model_name trực tiếp trong params của nó
-        method_params['model_name'] = common_config['embedding_model']
+    if selected_method != 'text_splitter':
+        method_params['device'] = MAIN_PROCESS_DML_DEVICE
 
+    # --- Select Chunking Function ---
+    selected_chunking_func: Callable
+    if selected_method == 'semantic_grouping':
+        selected_chunking_func = semantic_chunk_passage_from_grouping_logic
+    elif selected_method == 'semantic_splitter':
+        selected_chunking_func = chunk_passage_semantic_splitter
+    elif selected_method == 'text_splitter':
+        selected_chunking_func = chunk_passage_text_splitter
+    else:
+        raise ValueError(f"Unsupported chunking method: {selected_method}")
 
-    # --- Combine Configurations ---
+    # --- Combine Configurations & Define Paths ---
     DATASET_NAME = common_config['dataset_name']
+    DATA_DIR = common_config['data_dir']
+    BASE_OUTPUT_DIR = common_config['output_dir']
     INCLUDE_OIE = common_config.get('include_oie', False)
 
+    SHARED_DATA_ROOT_DIR = os.path.join(BASE_OUTPUT_DIR, f"{DATASET_NAME}_shared_original_data")
+    os.makedirs(SHARED_DATA_ROOT_DIR, exist_ok=True)
+    SHARED_CORPUS_CSV = os.path.join(SHARED_DATA_ROOT_DIR, "corpus.csv")
+    SHARED_QUERIES_CSV = os.path.join(SHARED_DATA_ROOT_DIR, "queries.csv")
+    SHARED_QRELS_CSV = os.path.join(SHARED_DATA_ROOT_DIR, f"qrels_{split_type}.csv")
+
     method_oie_suffix = "_oie" if INCLUDE_OIE else ""
-    # Sử dụng selected_method (tên gốc) cho thư mục, thêm hậu tố vào tên file
-    # Hoặc có thể thêm vào tên thư mục nếu muốn tách biệt hoàn toàn
     effective_method_name_for_path = f"{selected_method.replace('_', '-')}{method_oie_suffix}"
 
-    BASE_METHOD_DIR = os.path.join(common_config['output_dir'], f"{DATASET_NAME}_{effective_method_name_for_path}")
+    BASE_METHOD_DIR = os.path.join(BASE_OUTPUT_DIR, f"{DATASET_NAME}_{effective_method_name_for_path}")
     OUTPUT_DIR_METHOD = find_next_run_dir(BASE_METHOD_DIR, split_type)
+    os.makedirs(OUTPUT_DIR_METHOD, exist_ok=True)
 
     METHOD_AND_SPLIT_PREFIX = f"{DATASET_NAME}_{effective_method_name_for_path}_{split_type}"
+
     CHUNKS_OUTPUT_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_chunks.jsonl")
-    CHUNK_DOC_MAP_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_chunk_doc_map.json")
     DOC_CHUNK_MAP_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_doc_chunk_map.json")
+    CHUNK_DOC_MAP_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_chunk_doc_map.json")
     OUTPUT_TRIPLETS_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_triplets.tsv")
+    
+    # --- ADDED: Paths for run-specific corpus/query subsets for analysis ---
+    RUN_SPECIFIC_CORPUS_INPUT_CSV_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_corpus_for_processing.csv")
+    RUN_SPECIFIC_QUERIES_INPUT_CSV_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_queries_for_processing.csv")
 
-    EMBEDDING_MODEL_NAME = common_config['embedding_model']
-    MAX_TRIPLETS_TO_GENERATE = common_config['max_triplets']
-    MAX_DOCS_TO_PROCESS = common_config['max_docs']
-    RANDOM_SEED = common_config['random_seed'] # <-- Lấy random seed
+    # --- ADDED: Paths for MatchZoo formatted train/dev data ---
+    TRAIN_MZ_TSV_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_train_mz.tsv")
+    DEV_MZ_TSV_PATH = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_dev_mz.tsv")
 
-    # --- Map chunking method name to function ---
-    chunking_functions: Dict[str, Callable] = {
-        'semantic_grouping': semantic_chunk_passage_from_grouping_logic,
-        'semantic_splitter': chunk_passage_semantic_splitter,
-        'text_splitter': chunk_passage_text_splitter,
-    }
-    selected_chunking_func = chunking_functions.get(selected_method)
-    if selected_chunking_func is None or not callable(selected_chunking_func):
-        print(f"Error: Chunking function for '{selected_method}' not available/callable.")
-        exit()
+    # --- Load BEIR Dataset (from CSV or BEIR library) ---
+    corpus: Dict[str, Dict[str, str]]
+    queries: Dict[str, str]
+    qrels: Dict[str, Dict[str, int]]
 
-    # --- Print Final Configuration ---
-    print(f"\n--- Final Configuration ---")
-    print(f"Dataset: {DATASET_NAME}")
-    print(f"Processing Split: {split_type}")
-    LOCAL_DATA_PATH = common_config['data_dir'] 
-    print(f"BEIR Data Path: {LOCAL_DATA_PATH}")
-    print(f"Output Directory: {OUTPUT_DIR_METHOD}") 
-    print(f"Chunking Method: {selected_method}")
-    print(f"Include OIE: {'Yes' if INCLUDE_OIE else 'No'}") # Thêm dòng này
-    print(f"Embedding Model: {EMBEDDING_MODEL_NAME}")
-    print(f"Max Triplets: {MAX_TRIPLETS_TO_GENERATE if MAX_TRIPLETS_TO_GENERATE else 'Unlimited'}")
-    print(f"Max Documents to Process: {MAX_DOCS_TO_PROCESS if MAX_DOCS_TO_PROCESS else 'All'}")
-    print(f"Chunking Parameters: {method_params}")
-    print(f"---------------------------\n")
+    print(f"Always loading BEIR dataset: {DATASET_NAME} (split: {split_type}) from {DATA_DIR} as per user request...")
+    corpus, queries, qrels = GenericDataLoader(data_folder=DATA_DIR, prefix=None).load(split=split_type)
+    print(f"Loaded {len(corpus)} documents, {len(queries)} queries, and qrels for {len(qrels)} queries for split '{split_type}' from {DATA_DIR}.")
 
-    # --- Download NLTK data ---
-    try:
-        nltk.data.find('tokenizers/punkt')
-        print("NLTK 'punkt' resource found.") # Optional confirmation
-    except LookupError:
-        print("Downloading NLTK 'punkt' tokenizer...")
-        nltk.download('punkt', quiet=True)
+    # Now, check if shared files exist. If not, save them.
+    # This ensures that the shared CSVs are created once if they don't exist,
+    # but subsequent runs (even if this script is run again) won't overwrite them
+    # unless they are manually deleted. The primary loading is always from BEIR.
 
-    # <<< THÊM KHỐI NÀY ĐỂ TẢI punkt_tab >>>
-    try:
-        nltk.data.find('tokenizers/punkt_tab')
-        print("NLTK 'punkt_tab' resource found.") # Optional confirmation
-    except LookupError:
-        print("Downloading NLTK 'punkt_tab' resource...")
-        nltk.download('punkt_tab', quiet=True)
-    # <<< KẾT THÚC KHỐI THÊM >>>
+    if not os.path.exists(SHARED_CORPUS_CSV):
+        print(f"Shared corpus CSV not found. Saving original corpus to: {SHARED_CORPUS_CSV}...")
+        corpus_list = [{"_id": doc_id, "title": data.get("title", ""), "text": data.get("text", "")} for doc_id, data in corpus.items()]
+        pd.DataFrame(corpus_list).to_csv(SHARED_CORPUS_CSV, index=False)
+        print(f"Shared original corpus saved to: {SHARED_CORPUS_CSV}")
+    else:
+        print(f"Shared original corpus CSV already exists: {SHARED_CORPUS_CSV}. Skipping save.")
 
-    # --- Main Processing ---
-    # <<< SỬA ĐỔI: Tạo thư mục output cuối cùng (đã bao gồm số thứ tự) >>>
-    os.makedirs(OUTPUT_DIR_METHOD, exist_ok=True)
-    # <<< SỬA ĐỔI: Đảm bảo thư mục dữ liệu BEIR gốc tồn tại (nơi chứa thư mục con dataset) >>>
-    # Ví dụ: Nếu data_dir là './Data/msmarco/msmarco', thì thư mục gốc là './Data/msmarco'
-    beir_base_data_dir = os.path.dirname(common_config['data_dir'])
-    os.makedirs(beir_base_data_dir, exist_ok=True)
+    if not os.path.exists(SHARED_QUERIES_CSV):
+        print(f"Shared queries CSV not found. Saving original queries to: {SHARED_QUERIES_CSV}...")
+        queries_list = [{"_id": q_id, "text": q_text} for q_id, q_text in queries.items()]
+        pd.DataFrame(queries_list).to_csv(SHARED_QUERIES_CSV, index=False)
+        print(f"Shared original queries saved to: {SHARED_QUERIES_CSV}")
+    else:
+        print(f"Shared original queries CSV already exists: {SHARED_QUERIES_CSV}. Skipping save.")
 
-    # == Step 1: Load BEIR Data ==
-    # <<< SỬA ĐỔI: dataset_specific_path là đường dẫn người dùng nhập >>>
-    dataset_specific_path = common_config['data_dir'] # Ví dụ: './Data/msmarco/msmarco'
-    print(f"\nLoading BEIR dataset: {DATASET_NAME} (split: {split_type}) from {dataset_specific_path}...")
+    # For qrels, the SHARED_QRELS_CSV path is already specific to the split_type
+    if not os.path.exists(SHARED_QRELS_CSV):
+        print(f"Shared qrels CSV for split '{split_type}' not found. Saving to: {SHARED_QRELS_CSV}...")
+        qrels_list = []
+        for q_id, doc_scores in qrels.items():
+            for doc_id, score in doc_scores.items():
+                qrels_list.append({"query-id": q_id, "corpus-id": doc_id, "score": score})
+        pd.DataFrame(qrels_list).to_csv(SHARED_QRELS_CSV, index=False)
+        print(f"Shared original qrels for split '{split_type}' saved to: {SHARED_QRELS_CSV}")
+    else:
+        print(f"Shared original qrels CSV for split '{split_type}' already exists: {SHARED_QRELS_CSV}. Skipping save.")
 
-    try:
-        # <<< SỬA ĐỔI: Sử dụng dataset_specific_path và bỏ prefix >>>
-        corpus, queries, qrels = GenericDataLoader(data_folder=dataset_specific_path).load(split=split_type)
-        print(f"Loaded {len(corpus)} documents, {len(queries)} queries, and qrels for {len(qrels)} queries for split '{split_type}' from {dataset_specific_path}.")
-    except Exception as e:
-        # <<< SỬA ĐỔI: Thông báo lỗi bao gồm đường dẫn đúng >>>
-        print(f"Error loading BEIR dataset '{DATASET_NAME}' (split: {split_type}) from {dataset_specific_path}: {e}")
-        # <<< SỬA ĐỔI: Tải vào thư mục cha của dataset_specific_path >>>
-        download_target_dir = os.path.dirname(dataset_specific_path) # Ví dụ: './Data/msmarco'
-        print(f"Attempting to download using 'util.download_and_unzip' into '{download_target_dir}'...")
-        try:
-            url = f"https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/{DATASET_NAME}.zip"
-            # Tải vào thư mục cha, download_path sẽ là thư mục con được giải nén (dataset_specific_path)
-            download_path = util.download_and_unzip(url, download_target_dir)
-            print(f"Dataset downloaded and unzipped to: {download_path}") # download_path nên là dataset_specific_path
-
-            # <<< SỬA ĐỔI: Sử dụng download_path (chính là dataset_specific_path) và bỏ prefix >>>
-            corpus, queries, qrels = GenericDataLoader(data_folder=download_path).load(split=split_type)
-
-        except Exception as download_err:
-            print(f"CRITICAL: Failed to download or load dataset after download attempt: {download_err}")
-            exit(1)
-
-    # --- THÊM: Lưu trữ dữ liệu BEIR gốc ---
+    # --- Save Original BEIR Data (JSON per run - kept for logging) ---
+    # This part remains, saving to the run-specific directory
     print(f"Saving original BEIR data to {OUTPUT_DIR_METHOD}...")
     original_corpus_path = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_original_corpus.json")
     original_queries_path = os.path.join(OUTPUT_DIR_METHOD, f"{METHOD_AND_SPLIT_PREFIX}_original_queries.json")
@@ -484,56 +456,87 @@ if __name__ == "__main__":
 
     if chunking_needed:
         print(f"\nStarting Step 2: Chunking documents using '{selected_method}' method (Parallel)...")
-
-        # --- CẤU HÌNH XỬ LÝ SONG SONG ---
-        NUM_WORKERS = 2 # **ĐIỀU CHỈNH CẨN THẬN DỰA TRÊN RAM!**
+        NUM_WORKERS = 2
         print(f"Using {NUM_WORKERS} worker processes.")
-        # ---------------------------------
 
         chunk_to_doc_map = {}
         doc_to_chunk_map = {}
         processed_docs_count = 0
         total_chunks_created = 0
 
-        # --- SỬA ĐỔI: Tạo corpus_to_process ưu tiên tài liệu liên quan ---
+        corpus_to_process: Dict[str, Dict[str, str]] = {}
         if MAX_DOCS_TO_PROCESS:
             print(f"Prioritizing relevant documents for processing (limit: {MAX_DOCS_TO_PROCESS})...")
-            corpus_to_process = {}
             relevant_docs_in_corpus = {doc_id: data for doc_id, data in corpus.items() if doc_id in relevant_doc_ids}
             print(f"Found {len(relevant_docs_in_corpus)} relevant documents present in the loaded corpus.")
-
-            # Lấy các tài liệu liên quan trước, tối đa MAX_DOCS_TO_PROCESS
             relevant_items = list(relevant_docs_in_corpus.items())
             num_relevant_to_take = min(len(relevant_items), MAX_DOCS_TO_PROCESS)
             for i in range(num_relevant_to_take):
                 doc_id, data = relevant_items[i]
                 corpus_to_process[doc_id] = data
-
-            # Nếu chưa đủ MAX_DOCS_TO_PROCESS, bổ sung bằng các tài liệu khác
             remaining_needed = MAX_DOCS_TO_PROCESS - len(corpus_to_process)
             if remaining_needed > 0:
                 print(f"Adding {remaining_needed} more non-prioritized documents to reach the limit...")
                 added_count = 0
                 for doc_id, data in corpus.items():
-                    if doc_id not in corpus_to_process: # Chỉ thêm nếu chưa có
+                    if doc_id not in corpus_to_process:
                         corpus_to_process[doc_id] = data
                         added_count += 1
                         if added_count >= remaining_needed:
                             break
             print(f"Final corpus_to_process size: {len(corpus_to_process)}")
-
-        else: # Nếu không giới hạn, xử lý tất cả
+        else:
             print("Processing all documents in the corpus.")
             corpus_to_process = corpus
-        # ----------------------------------------------------------------
+
+        # --- ADDED: Save the determined corpus_to_process and relevant/all queries to CSV for analysis ---
+        print(f"\nSaving subset of data used for this run's processing to CSVs in {OUTPUT_DIR_METHOD}...")
+        # Save corpus_to_process
+        if corpus_to_process:
+            corpus_to_process_list = [{"_id": doc_id, "title": data.get("title", ""), "text": data.get("text", "")} 
+                                      for doc_id, data in corpus_to_process.items()]
+            pd.DataFrame(corpus_to_process_list).to_csv(RUN_SPECIFIC_CORPUS_INPUT_CSV_PATH, index=False)
+            print(f"Saved corpus for processing ({len(corpus_to_process_list)} docs) to: {RUN_SPECIFIC_CORPUS_INPUT_CSV_PATH}")
+        else:
+            print(f"Corpus for processing is empty. Skipping save to {RUN_SPECIFIC_CORPUS_INPUT_CSV_PATH}.")
+
+        # Save relevant or all queries
+        queries_to_save_dict: Dict[str, str] = {}
+        if MAX_DOCS_TO_PROCESS and corpus_to_process: # Save relevant queries if corpus was subsetted
+            print("Identifying queries relevant to the processed corpus subset...")
+            if qrels and queries: # Ensure qrels and queries are available
+                for q_id, doc_scores in qrels.items():
+                    if q_id in queries: # Ensure query_id from qrels exists in the main queries dict
+                        for doc_id_in_qrel, score in doc_scores.items():
+                            if score > 0 and doc_id_in_qrel in corpus_to_process:
+                                queries_to_save_dict[q_id] = queries[q_id]
+                                break # Query added, move to next query_id in qrels
+            if queries_to_save_dict:
+                queries_to_save_list = [{"_id": q_id, "text": q_text} for q_id, q_text in queries_to_save_dict.items()]
+                pd.DataFrame(queries_to_save_list).to_csv(RUN_SPECIFIC_QUERIES_INPUT_CSV_PATH, index=False)
+                print(f"Saved relevant queries ({len(queries_to_save_list)}) to: {RUN_SPECIFIC_QUERIES_INPUT_CSV_PATH}")
+            else:
+                print(f"No queries found to be directly relevant to the processed corpus subset. {RUN_SPECIFIC_QUERIES_INPUT_CSV_PATH} will not be created or will be empty.")
+                # Optionally, create an empty file or save all queries as a fallback if desired
+                # For now, it just skips or leaves an empty/non-existent file.
+        elif not MAX_DOCS_TO_PROCESS and queries: # Save all queries if full corpus is used
+            print("Saving all queries (since full corpus is processed)...")
+            all_queries_list = [{"_id": q_id, "text": q_text} for q_id, q_text in queries.items()]
+            if all_queries_list:
+                pd.DataFrame(all_queries_list).to_csv(RUN_SPECIFIC_QUERIES_INPUT_CSV_PATH, index=False)
+                print(f"Saved all queries ({len(all_queries_list)}) to: {RUN_SPECIFIC_QUERIES_INPUT_CSV_PATH}")
+            else:
+                print(f"No queries available to save. {RUN_SPECIFIC_QUERIES_INPUT_CSV_PATH} will not be created.")
+        else:
+            print(f"Queries list is empty or corpus_to_process is empty. Skipping save to {RUN_SPECIFIC_QUERIES_INPUT_CSV_PATH}.")
+        # --- END ADDED SECTION ---
 
         corpus_items = list(corpus_to_process.items())
         total_docs_to_process = len(corpus_items)
 
         if total_docs_to_process == 0:
-            print("Warning: No documents selected for processing. Exiting Step 2.")
+            print("Warning: No documents selected for processing. Skipping chunking.")
         else:
-            # Chuẩn bị sẵn các tham số cố định cho worker
             worker_func_partial = functools.partial(
                 chunk_document_worker,
                 chunking_func=selected_chunking_func,
@@ -544,9 +547,9 @@ if __name__ == "__main__":
             try:
                 # Mở file chunks output trước
                 with open(CHUNKS_OUTPUT_PATH, 'w', encoding='utf-8') as f_chunks_out, \
-                     concurrent.futures.ProcessPoolExecutor(
+                     ProcessPoolExecutor( # Corrected: No need for concurrent.futures here as it's imported
                         max_workers=NUM_WORKERS,
-                        initializer=init_worker # <<< THÊM INITIALIZER
+                        initializer=init_worker_directml # <<< THÊM INITIALIZER
                     ) as executor:
 
                     # Sử dụng executor.map
@@ -772,3 +775,55 @@ if __name__ == "__main__":
         print("Next step: Use this TSV file to fine-tune your model using MatchZoo (Step 4).")
     else: # test
         print("Next step: Use this TSV file (or the generated chunks/maps) for evaluating your model.")
+
+    # == Step 4: Transform Triplets and Split for MatchZoo ==
+    print(f"\\nStarting Step 4: Transforming triplets and splitting for MatchZoo...")
+    if not os.path.exists(OUTPUT_TRIPLETS_PATH):
+        print(f"Error: Triplets file not found at {OUTPUT_TRIPLETS_PATH}. Cannot proceed with MatchZoo data preparation.")
+    else:
+        try:
+            print(f"Reading triplets from: {OUTPUT_TRIPLETS_PATH}")
+            triplets_df = pd.read_csv(OUTPUT_TRIPLETS_PATH, sep='\\t', header=None, names=["query", "pos_chunk", "neg_chunk"], engine='python')
+            
+            if triplets_df.empty:
+                print("Triplets file is empty. Skipping MatchZoo data preparation.")
+            else:
+                print(f"Transforming {len(triplets_df)} triplets to MatchZoo format...")
+                matchzoo_data = []
+                for _, row in tqdm(triplets_df.iterrows(), total=triplets_df.shape[0], desc="Transforming to MatchZoo"): # ADDED tqdm
+                    # Ensure no NaN values are passed, replace with empty string if necessary
+                    query = str(row['query']) if pd.notna(row['query']) else ""
+                    pos_chunk = str(row['pos_chunk']) if pd.notna(row['pos_chunk']) else ""
+                    neg_chunk = str(row['neg_chunk']) if pd.notna(row['neg_chunk']) else ""
+
+                    matchzoo_data.append({'label': 1, 'text_left': query, 'text_right': pos_chunk})
+                    matchzoo_data.append({'label': 0, 'text_left': query, 'text_right': neg_chunk})
+                
+                matchzoo_df = pd.DataFrame(matchzoo_data)
+                # Shuffle the DataFrame to mix positive and negative samples
+                matchzoo_df = matchzoo_df.sample(frac=1, random_state=RANDOM_SEED).reset_index(drop=True) # ADDED shuffle
+                print(f"Created and shuffled {len(matchzoo_df)} MatchZoo formatted entries.")
+
+                print(f"Splitting data into training and development sets (90/10 split, random_state={RANDOM_SEED})...")
+                # shuffle=True is required for stratify. The previous shuffle ensures randomness, this maintains it with stratification.
+                train_df, dev_df = train_test_split(matchzoo_df, test_size=0.1, random_state=RANDOM_SEED, shuffle=True, stratify=matchzoo_df['label'] if 'label' in matchzoo_df else None)
+
+                print(f"Saving MatchZoo training data ({len(train_df)} entries) to: {TRAIN_MZ_TSV_PATH}")
+                train_df.to_csv(TRAIN_MZ_TSV_PATH, sep='\t', index=False, header=False, columns=['text_left', 'text_right', 'label']) # CHANGED column order
+
+                print(f"Saving MatchZoo development data ({len(dev_df)} entries) to: {DEV_MZ_TSV_PATH}")
+                dev_df.to_csv(DEV_MZ_TSV_PATH, sep='\t', index=False, header=False, columns=['text_left', 'text_right', 'label']) # CHANGED column order
+                
+                print("MatchZoo data preparation completed.")
+        except pd.errors.EmptyDataError:
+            print(f"Warning: The triplets file {OUTPUT_TRIPLETS_PATH} is empty or not a valid CSV. Skipping MatchZoo data preparation.")
+        except Exception as e:
+            print(f"An error occurred during MatchZoo data preparation: {e}")
+            traceback.print_exc()
+
+    print("\n--- All Processing Steps Completed ---") # ADDED final message
+    # Call close_oie_clients() explicitly here as a safeguard, though atexit should handle it.
+    # It's good practice if there are any non-standard exit paths or interruptions.
+    print("Ensuring OIE clients are closed...")
+    close_oie_clients() 
+    print("Exiting script.")

@@ -5,24 +5,38 @@ import matchzoo as mz
 import nltk
 import os
 from pathlib import Path
-from transform_data import transform_to_matchzoo_format 
+import json # ADDED for saving config
+from datetime import datetime # ADDED for saving config
 
 print(f"MatchZoo version: {mz.__version__}")
 print(f"PyTorch version: {torch.__version__}")
 print(f"NumPy version: {np.__version__}")
 print(f"Pandas version: {pd.__version__}")
 
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_triplets.tsv"
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv"
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv"
+# +++ ADDED HELPER FUNCTION +++
+def safe_get_param_value(params_table, key, default_val):
+    """Safely retrieves a parameter value from a MatchZoo ParamTable."""
+    if key in params_table: # Check if key exists
+        val = params_table[key] # Retrieve item
+        # Defensive check: if somehow a Param object itself is returned
+        if isinstance(val, mz.engine.param.Param):
+            return val.value
+        return val # Assumed to be the actual value
+    return default_val
+# +++ END ADDED HELPER FUNCTION +++
+
+TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
+DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
+TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
 
 EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt"
-EMBEDDING_DIMENSION = 100 
+EMBEDDING_DIMENSION = 100
 
 OUTPUT_DIR = Path("D:/SemanticSearch/trained_matchpyramid_model")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_SAVE_PATH = OUTPUT_DIR / "matchpyramid_model.pt"
-PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "matchpyramid_preprocessor.dill"
+PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "preprocessor.dill" # CHANGED: Correct filename
+CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json" # ADDED for config
 
 BATCH_SIZE = 128
 EPOCHS = 10
@@ -41,6 +55,23 @@ except LookupError:
     except Exception as e:
         print(f"Failed to download 'punkt': {e}. Please ensure NLTK can download data or install 'punkt' manually.")
         exit(1)
+
+# --- Helper function to safely get parameter values ---
+def safe_get_param_value(params_source, key, default_val):
+    """
+    Safely retrieves a parameter value from a MatchZoo ParamTable or a dictionary.
+    For ParamTable, it directly accesses the value.
+    For dictionaries, it uses .get().
+    """
+    if isinstance(params_source, mz.engine.param_table.ParamTable):
+        if key in params_source:
+            param_obj = params_source.get(key) # Gets the Param object
+            if param_obj is not None:
+                return param_obj.value # Access the .value attribute of the Param object
+        return default_val
+    elif isinstance(params_source, dict):
+        return params_source.get(key, default_val)
+    return default_val
 
 print("Defining ranking task for MatchPyramid...")
 ranking_task = mz.tasks.Ranking(losses=mz.losses.RankCrossEntropyLoss(num_neg=1))
@@ -85,13 +116,9 @@ if not source_dev_data:
     print("CRITICAL: Development/Validation data is empty. Exiting.")
     exit(1)
 
-transformed_train_data = transform_to_matchzoo_format(source_train_data)
-transformed_dev_data = transform_to_matchzoo_format(source_dev_data)
-transformed_test_data = transform_to_matchzoo_format(source_test_data)
-
-train_df = pd.DataFrame(transformed_train_data, columns=['text_left', 'text_right', 'label'])
-dev_df = pd.DataFrame(transformed_dev_data, columns=['text_left', 'text_right', 'label'])
-test_df = pd.DataFrame(transformed_test_data, columns=['text_left', 'text_right', 'label'])
+train_df = pd.DataFrame(source_train_data, columns=['text_left', 'text_right', 'label'])
+dev_df = pd.DataFrame(source_dev_data, columns=['text_left', 'text_right', 'label'])
+test_df = pd.DataFrame(source_test_data, columns=['text_left', 'text_right', 'label'])
 
 train_pack_raw = mz.pack(train_df, task=ranking_task)
 dev_pack_raw = mz.pack(dev_df, task=ranking_task)
@@ -185,7 +212,7 @@ trainer = mz.trainers.Trainer(
     validloader=validloader,
     validate_interval=None, 
     epochs=EPOCHS,
-    patience=5
+    patience=EPOCHS
 )
 print("Trainer setup complete.")
 
@@ -193,11 +220,82 @@ print(f"Starting MatchPyramid model training for {EPOCHS} epochs...")
 trainer.run()
 print("Training finished.")
 
+print("Preparing and saving model, preprocessor, and config...")
+
 print(f"Saving model to: {MODEL_SAVE_PATH}")
 torch.save(model.state_dict(), MODEL_SAVE_PATH)
-print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}")
-preprocessor.save(PREPROCESSOR_SAVE_PATH)
+print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}") # This now prints the correct target file path
+preprocessor.save(OUTPUT_DIR) # CHANGED: Pass the directory to the save method
+
+# Create Config Dictionary
+config_to_save = {
+    "model_name": "MatchPyramid",
+    "model_class": model.__class__.__name__,
+    "task_type": safe_get_param_value(model.params, 'task', {}).__class__.__name__ if safe_get_param_value(model.params, 'task', None) else None,
+    "loss_function_class": safe_get_param_value(model.params, 'task', {}).loss.__class__.__name__ if safe_get_param_value(model.params, 'task', None) and hasattr(safe_get_param_value(model.params, 'task', {}), 'loss') else None,
+    "loss_num_neg": safe_get_param_value(safe_get_param_value(model.params, 'task', {}).loss, '_num_neg', None) if safe_get_param_value(model.params, 'task', None) and hasattr(safe_get_param_value(model.params, 'task', {}), 'loss') else None,
+    "optimizer_class": optimizer.__class__.__name__,
+    "learning_rate": optimizer.defaults.get('lr'),
+    "model_hyperparameters_used": {
+        "kernel_size": safe_get_param_value(model.params, 'kernel_size', None),
+        "kernel_count": safe_get_param_value(model.params, 'kernel_count', None),
+        "dpool_size": safe_get_param_value(model.params, 'dpool_size', None),
+        "dropout_rate": safe_get_param_value(model.params, 'dropout_rate', None),
+        "embedding_input_dim_model_param": safe_get_param_value(model.params, 'embedding_input_dim', None), # Usually derived from preprocessor
+        "embedding_output_dim_model_param": safe_get_param_value(model.params, 'embedding_output_dim', None) # Usually derived from preprocessor
+    },
+    "embedding_source_file": EMBEDDING_FILE_PATH if 'EMBEDDING_FILE_PATH' in globals() and os.path.exists(EMBEDDING_FILE_PATH) else "random_dummy_embeddings",
+    "embedding_dim_used": EMBEDDING_DIMENSION,
+    "batch_size": BATCH_SIZE,
+    "epochs_configured": EPOCHS,
+    "epochs_completed": trainer._epoch if hasattr(trainer, '_epoch') else 0,
+    "patience_used": trainer.patience if hasattr(trainer, 'patience') else None, # Corrected: trainer object has patience directly
+    "validate_interval": trainer.validate_interval if hasattr(trainer, 'validate_interval') else None, # Corrected
+    "early_stopping_key": trainer.early_stopping.key if hasattr(trainer, 'early_stopping') and trainer.early_stopping else None, # Corrected
+    "device_used_for_training": str(trainer.device) if hasattr(trainer, 'device') else None, # Corrected
+    "start_epoch_configured": trainer.start_epoch if hasattr(trainer, 'start_epoch') else 1, # Corrected
+    "gradient_clip_norm": trainer.clip_norm if hasattr(trainer, 'clip_norm') else None, # Corrected
+    "scheduler_class": trainer.scheduler.__class__.__name__ if hasattr(trainer, 'scheduler') and trainer.scheduler is not None else None, # Corrected
+    "trainer_save_directory": str(trainer.save_dir.resolve()) if hasattr(trainer, 'save_dir') and trainer.save_dir is not None else None, # Corrected
+    "trainer_save_all_flag": trainer.save_all if hasattr(trainer, 'save_all') else False, # Corrected
+    "trainer_verbose_level": trainer.verbose if hasattr(trainer, 'verbose') else 1, # Corrected
+    "fixed_length_left": preprocessor.context.get('fixed_length_left'),
+    "fixed_length_right": preprocessor.context.get('fixed_length_right'),
+    "vocab_size_from_preprocessor_context": preprocessor.context.get('vocab_size'),
+    "embedding_input_dim_from_preprocessor_context": preprocessor.context.get('embedding_input_dim'), # This is vocab_size + 1 (for padding)
+    "matchzoo_version": mz.__version__,
+    "training_script": os.path.basename(__file__),
+    "training_date": datetime.now().isoformat()
+}
+
+# Ensure all values in model_hyperparameters_used are serializable (they should be by default for MatchPyramid)
+for key, value in config_to_save.get("model_hyperparameters_used", {}).items():
+    if isinstance(value, np.ndarray):
+        config_to_save["model_hyperparameters_used"][key] = value.tolist()
+    elif not isinstance(value, (list, dict, str, int, float, bool, type(None))):
+        config_to_save["model_hyperparameters_used"][key] = str(value)
+
+print(f"Saving config to: {CONFIG_SAVE_PATH}")
+try:
+    with open(CONFIG_SAVE_PATH, 'w') as f:
+        json.dump(config_to_save, f, indent=4)
+    print("Config saved successfully.")
+except TypeError as e:
+    print(f"Error serializing config to JSON: {e}")
+    print("Attempting to save problematic config with non-serializable items converted to string...")
+    for k_outer, v_outer in config_to_save.items():
+        if isinstance(v_outer, dict):
+            for k_inner, v_inner in v_outer.items():
+                if not isinstance(v_inner, (list, dict, str, int, float, bool, type(None))):
+                    config_to_save[k_outer][k_inner] = str(v_inner)
+        elif not isinstance(v_outer, (list, dict, str, int, float, bool, type(None))):
+            config_to_save[k_outer] = str(v_outer)
+    with open(CONFIG_SAVE_PATH, 'w') as f:
+        json.dump(config_to_save, f, indent=4)
+    print("Problematic config saved with string conversions.")
+
 
 print("MatchPyramid training script finished successfully.")
 print(f"Model saved at: {MODEL_SAVE_PATH}")
 print(f"Preprocessor saved at: {PREPROCESSOR_SAVE_PATH}")
+print(f"Config saved at: {CONFIG_SAVE_PATH}") # ADDED

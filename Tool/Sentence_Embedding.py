@@ -33,15 +33,24 @@ def get_dml_device():
 # Key sẽ là model_name_or_path, value là đối tượng model đã tải
 _model_cache = {}
 
-def sentence_embedding(text, model_name_or_path="thenlper/gte-large", batch_size=32):
+def sentence_embedding(text, model_name_or_path="thenlper/gte-large", batch_size=32, device=None): # Added device parameter
     """
     Nhúng văn bản sử dụng SentenceTransformer, ưu tiên DirectML.
+    Nếu 'device' được cung cấp, sẽ sử dụng device đó.
+    Ngược lại, sẽ cố gắng lấy DML device qua get_dml_device().
     """
     global _model_cache
     
-    target_device = get_dml_device() # Lấy thiết bị (DML hoặc CPU)
+    target_device = None
+    if device is not None:
+        target_device = device
+        # print(f"Sentence_Embedding: Using provided device: {target_device} in process {os.getpid()}")
+    else:
+        target_device = get_dml_device() # Lấy thiết bị (DML hoặc CPU) nếu không có device nào được truyền vào
+        # print(f"Sentence_Embedding: No device provided, got device via get_dml_device(): {target_device} in process {os.getpid()}")
 
     # Kiểm tra xem model đã được tải cho device này chưa
+    # Sử dụng str(target_device) để đảm bảo key là hashable và nhất quán
     cache_key = (model_name_or_path, str(target_device))
 
     if cache_key not in _model_cache:
@@ -53,22 +62,39 @@ def sentence_embedding(text, model_name_or_path="thenlper/gte-large", batch_size
             print(f"Sentence_Embedding: Model '{model_name_or_path}' loaded successfully on '{target_device}'.")
         except Exception as e:
             print(f"Sentence_Embedding: Error loading model '{model_name_or_path}' on device '{target_device}': {e}")
-            print(f"Sentence_Embedding: Falling back to CPU for model '{model_name_or_path}'.")
-            # Nếu lỗi khi tải lên DML, thử tải lên CPU
-            cpu_device = torch.device("cpu")
-            model = SentenceTransformer(model_name_or_path, device=cpu_device)
-            _model_cache[(model_name_or_path, str(cpu_device))] = model # Cache với device là CPU
-            target_device = cpu_device # Cập nhật target_device để encode dùng CPU
+            # Nếu lỗi khi tải lên device được chỉ định (hoặc DML), thử tải lên CPU
+            # Chỉ thử CPU nếu device ban đầu không phải là CPU
+            if str(target_device).lower() != "cpu":
+                print(f"Sentence_Embedding: Falling back to CPU for model '{model_name_or_path}'.")
+                cpu_device = torch.device("cpu")
+                # Cập nhật cache key cho CPU
+                cpu_cache_key = (model_name_or_path, str(cpu_device))
+                if cpu_cache_key not in _model_cache: # Kiểm tra lại cache cho CPU
+                    try:
+                        model = SentenceTransformer(model_name_or_path, device=cpu_device)
+                        _model_cache[cpu_cache_key] = model # Cache với device là CPU
+                        print(f"Sentence_Embedding: Model '{model_name_or_path}' loaded successfully on CPU after fallback.")
+                    except Exception as e_cpu:
+                        print(f"Sentence_Embedding: Error loading model '{model_name_or_path}' on CPU during fallback: {e_cpu}")
+                        # Nếu vẫn lỗi trên CPU, raise lỗi hoặc trả về None/Exception tùy theo yêu cầu xử lý lỗi
+                        raise # Hoặc xử lý khác
+                else:
+                    model = _model_cache[cpu_cache_key]
+                target_device = cpu_device # Cập nhật target_device để encode dùng CPU
+            else: # Nếu target_device ban đầu đã là CPU và vẫn lỗi, thì raise lỗi
+                raise
     else:
         # print(f"Sentence_Embedding: Using cached model '{model_name_or_path}' from device '{target_device}'.") # Bỏ comment nếu muốn log
         model = _model_cache[cache_key]
 
-    # Đảm bảo model đang ở đúng target_device trước khi encode (phòng trường hợp cache phức tạp)
-    # Thông thường, nếu model đã được khởi tạo với device, nó sẽ ở trên device đó.
-    # model.to(target_device) # Dòng này có thể không cần thiết nếu khởi tạo đã đúng
+    # Đảm bảo model đang ở đúng target_device trước khi encode
+    # Điều này quan trọng nếu model được lấy từ cache và target_device có thể đã thay đổi (ví dụ: fallback sang CPU)
+    # Tuy nhiên, SentenceTransformer quản lý device của nó. Nếu model được load đúng device, không cần .to() nữa.
+    # if model.device != target_device: # model.device là torch.device object
+    #    model.to(target_device) # Chỉ di chuyển nếu device của model khác với target_device hiện tại
 
     # print(f"Sentence_Embedding: Encoding text on device '{model.device}' (target: '{target_device}')...") # Bỏ comment nếu muốn log chi tiết
-    return model.encode(text, batch_size=batch_size, show_progress_bar=True)
+    return model.encode(text, batch_size=batch_size, show_progress_bar=False) # Tắt progress bar mặc định ở đây
 
 # Hàm dọn dẹp cache (tùy chọn, có thể không cần thiết nếu tiến trình tự kết thúc)
 def clear_embedding_cache():

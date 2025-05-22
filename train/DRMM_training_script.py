@@ -5,16 +5,14 @@ import matchzoo as mz
 import nltk
 import os
 from pathlib import Path
-from transform_data import transform_to_matchzoo_format #
+import json # ADDED for saving config
+from Tool.transform_data import transform_to_matchzoo_format
+from datetime import datetime # ADDED for saving config
 
 print(f"MatchZoo version: {mz.__version__}")
 print(f"PyTorch version: {torch.__version__}")
 print(f"NumPy version: {np.__version__}")
 print(f"Pandas version: {pd.__version__}")
-
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_triplets.tsv"
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv"
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv"
 
 EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt"
 EMBEDDING_DIMENSION = 100 
@@ -22,7 +20,8 @@ EMBEDDING_DIMENSION = 100
 OUTPUT_DIR = Path("D:/SemanticSearch/trained_drmm_model")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_SAVE_PATH = OUTPUT_DIR / "drmm_model.pt"
-PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "drmm_preprocessor.dill"
+# PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "drmm_preprocessor.dill" # Path for the preprocessor file
+CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json" # ADDED: Path for the config file
 
 HIST_BIN_SIZE = 30
 BATCH_SIZE = 20
@@ -42,6 +41,16 @@ except LookupError:
     except Exception as e:
         print(f"Failed to download 'punkt': {e}. Please ensure NLTK can download data or install 'punkt' manually.")
         exit(1)
+
+# --- Helper function to safely get parameter values (copied from MatchLSTM script) ---
+def safe_get_param_value(params_table, key, default_val):
+    if key in params_table: # Check if key exists
+        val = params_table[key] # Retrieve item, should be the value due to ParamTable.__getitem__
+        # Defensive check: if somehow a Param object itself is returned by __getitem__
+        if isinstance(val, mz.engine.param.Param):
+            return val.value
+        return val # Assumed to be the actual value
+    return default_val
 
 print("Defining ranking task for DRMM...")
 ranking_task = mz.tasks.Ranking(losses=mz.losses.RankCrossEntropyLoss(num_neg=10))
@@ -73,11 +82,15 @@ def load_triplet_data_from_tsv(file_path, delimiter='\t'):
     except Exception as e:
         print(f"ERROR: Could not read file {file_path}: {e}")
         return []
+TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
+DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
+TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
+
+source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
+source_test_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
+source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
 
 print("Loading CUSTOM dataset...")
-source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
-source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
-source_test_data = load_triplet_data_from_tsv(TEST_FILE_PATH)
 
 if not source_train_data:
     print("CRITICAL: Training data is empty. Exiting.")
@@ -86,13 +99,13 @@ if not source_dev_data:
     print("CRITICAL: Development/Validation data is empty. Exiting.")
     exit(1)
 
-transformed_train_data = transform_to_matchzoo_format(source_train_data)
-transformed_dev_data = transform_to_matchzoo_format(source_dev_data)
-transformed_test_data = transform_to_matchzoo_format(source_test_data)
+source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
+source_test_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
+source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
 
-train_df = pd.DataFrame(transformed_train_data, columns=['text_left', 'text_right', 'label'])
-dev_df = pd.DataFrame(transformed_dev_data, columns=['text_left', 'text_right', 'label'])
-test_df = pd.DataFrame(transformed_test_data, columns=['text_left', 'text_right', 'label'])
+train_df = pd.DataFrame(source_train_data, columns=['text_left', 'text_right', 'label'])
+test_df = pd.DataFrame(source_test_data, columns=['text_left', 'text_right', 'label'])
+dev_df = pd.DataFrame(source_dev_data, columns=['text_left', 'text_right', 'label'])
 
 train_pack_raw = mz.pack(train_df, task=ranking_task)
 dev_pack_raw = mz.pack(dev_df, task=ranking_task)
@@ -193,7 +206,7 @@ trainer = mz.trainers.Trainer(
     validloader=validloader,
     validate_interval=None, # Validates at the end of each epoch
     epochs=EPOCHS,
-    patience=5
+    patience=EPOCHS # MODIFIED: Set patience to EPOCHS to run all epochs
 )
 print("Trainer setup complete.")
 
@@ -201,11 +214,84 @@ print(f"Starting DRMM model training for {EPOCHS} epochs...")
 trainer.run()
 print("Training finished.")
 
+# --- Consolidate Artifact Saving ---
+print("Preparing and saving model, preprocessor, and config...")
+
+# 1. Create Config Dictionary
+config_to_save = {
+    "model_name": "DRMM",
+    "model_class": model.__class__.__name__,
+    "task_type": ranking_task.__class__.__name__, # Used ranking_task directly
+    "loss_function_class": ranking_task.losses[0].__class__.__name__, # MODIFIED: Access the first loss in the list
+    "loss_num_neg": ranking_task.losses[0]._num_neg if hasattr(ranking_task.losses[0], '_num_neg') else None, # MODIFIED: Directly access attribute
+    "optimizer_class": optimizer.__class__.__name__,
+    "optimizer_params": optimizer.defaults,
+    "model_hyperparameters_used": {
+        "mask_value": safe_get_param_value(model.params, 'mask_value', 0),
+        "hist_bin_size": safe_get_param_value(model.params, 'hist_bin_size', HIST_BIN_SIZE),
+        "mlp_num_layers": safe_get_param_value(model.params, 'mlp_num_layers', 1),
+        "mlp_num_units": safe_get_param_value(model.params, 'mlp_num_units', 10),
+        "mlp_num_fan_out": safe_get_param_value(model.params, 'mlp_num_fan_out', 1),
+        "mlp_activation_func": safe_get_param_value(model.params, 'mlp_activation_func', 'tanh'),
+        # embedding_matrix is directly passed, so its dimensions are key
+        "embedding_input_dim_from_matrix_shape": embedding_matrix.shape[0] if embedding_matrix is not None else None,
+        "embedding_output_dim_from_matrix_shape": embedding_matrix.shape[1] if embedding_matrix is not None else None,
+    },
+    "embedding_source_file": EMBEDDING_FILE_PATH if 'EMBEDDING_FILE_PATH' in globals() and EMBEDDING_FILE_PATH and os.path.exists(EMBEDDING_FILE_PATH) else "random_dummy_embeddings_or_not_specified",
+    "embedding_dim_configured": EMBEDDING_DIMENSION,
+    "batch_size": BATCH_SIZE,
+    "epochs_configured": EPOCHS,
+    "epochs_completed": trainer._epoch if hasattr(trainer, '_epoch') else 0,
+    "patience_used": trainer._early_stopping.patience if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'patience') else None,
+    "validate_interval": trainer._validate_interval if hasattr(trainer, '_validate_interval') else None,
+    "early_stopping_key": trainer._early_stopping.key if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'key') else None,
+    "device_used_for_training": str(trainer._device) if hasattr(trainer, '_device') else None,
+    "trainer_verbose_level": trainer._verbose if hasattr(trainer, '_verbose') else 1,
+    "preprocessor_context": {
+        "fixed_length_left": preprocessor.context.get('fixed_length_left'),
+        "fixed_length_right": preprocessor.context.get('fixed_length_right'),
+        "vocab_size": preprocessor.context.get('vocab_size'),
+        "embedding_input_dim": preprocessor.context.get('embedding_input_dim'), # Typically vocab_size + 1
+        # "vocab_path": str(Path(preprocessor.context.get('vocab_unit')._state.get('term_index_path')).resolve()) if preprocessor.context.get('vocab_unit') and preprocessor.context.get('vocab_unit')._state.get('term_index_path') else None,
+        "vocab_path": None, # Initialize to None
+    },
+    "matchzoo_version": mz.__version__,
+    "pytorch_version": torch.__version__,
+    "numpy_version": np.__version__,
+    "pandas_version": pd.__version__,
+    "training_script": os.path.basename(__file__),
+    "training_date": pd.Timestamp.now().isoformat(),
+    "output_directory": str(OUTPUT_DIR.resolve())
+}
+
+# Get vocab_path safely for Python 3.7
+vocab_unit_object = preprocessor.context.get('vocab_unit')
+if vocab_unit_object and hasattr(vocab_unit_object, 'state') and isinstance(vocab_unit_object.state, dict):
+    term_index_path_value = vocab_unit_object.state.get('term_index_path')
+    if term_index_path_value:
+        config_to_save["preprocessor_context"]["vocab_path"] = str(Path(term_index_path_value).resolve())
+
+# Ensure all values in model_hyperparameters_used are serializable (e.g. numpy types to python types)
+for key, value in config_to_save.get("model_hyperparameters_used", {}).items():
+    if hasattr(value, 'item'): # For numpy types like np.int32
+        config_to_save["model_hyperparameters_used"][key] = value.item()
+
+# 2. Save Config
+with open(CONFIG_SAVE_PATH, 'w', encoding='utf-8') as f:
+    json.dump(config_to_save, f, indent=4)
+print(f"Config saved to {CONFIG_SAVE_PATH}")
+
+# 3. Save Model
 print(f"Saving model to: {MODEL_SAVE_PATH}")
 torch.save(model.state_dict(), MODEL_SAVE_PATH)
-print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}")
-preprocessor.save(PREPROCESSOR_SAVE_PATH)
 
-print("DRMM training script finished successfully.")
+# 4. Save Preprocessor
+# preprocessor.save() expects a directory and saves "preprocessor.dill" within it.
+preprocessor_file_in_output_dir = OUTPUT_DIR / "preprocessor.dill"
+print(f"Saving preprocessor to directory: {OUTPUT_DIR} (will be saved as {preprocessor_file_in_output_dir})")
+preprocessor.save(OUTPUT_DIR) # Pass the directory
+
+print("\nDRMM training script finished successfully.")
 print(f"Model saved at: {MODEL_SAVE_PATH}")
-print(f"Preprocessor saved at: {PREPROCESSOR_SAVE_PATH}")
+print(f"Preprocessor saved at: {preprocessor_file_in_output_dir}") # Updated path
+print(f"Config saved at: {CONFIG_SAVE_PATH}")

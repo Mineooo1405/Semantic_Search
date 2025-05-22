@@ -2,25 +2,24 @@ import pandas as pd
 # from Tool.Database import connect_to_db # Not needed for chunking function
 import json # Not needed for chunking function
 import numpy as np
+import os # ADDED: Import os
+import gc
+import time
+import re
+import pickle
+import traceback # ADDED: Import traceback
+import hashlib # ADDED: Import hashlib
+from sklearn.metrics.pairwise import cosine_similarity # ADDED: Import cosine_similarity
 from dotenv import load_dotenv
-import os
-import traceback
-from typing import List, Tuple, Optional # Adjusted typing import
+from typing import List, Tuple, Optional, Dict # MODIFIED: Added Dict
 from Tool.Sentence_Detector import extract_and_simplify_sentences
 # --- Use the standard embedding function ---
 from Tool.Sentence_Embedding import sentence_embedding as embed_text_list_tool
+from Tool.OIE import extract_relations_from_paragraph # MODIFIED: Import updated OIE function
 # from Tool.OIE import extract_triples_for_search # Not needed for chunking function
-import re
 import matplotlib.pyplot as plt # Not needed for chunking function
 import seaborn as sns # Not needed for chunking function
-import time # Not needed for chunking function
-import pickle # Not needed for chunking function
-# import spacy # Not needed for chunking function
-import hashlib
-from Tool.Database import connect_to_db # Not needed for chunking function
-from Tool.OIE import extract_triples_for_search # Not needed for chunking function
-from sklearn.metrics.pairwise import cosine_similarity
-import gc # Thêm import gc
+from Tool.Database import connect_to_db # ADDED: Import connect_to_db
 load_dotenv()
 
 def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
@@ -648,7 +647,7 @@ def process_oie_in_groups(sentences, groups):
             sentence = sentences[sentence_idx]
             
             # Trích xuất triples từ câu
-            triples = extract_triples_for_search(sentence)
+            triples = extract_relations_from_paragraph(sentence, use_enhanced_settings=True)
             
             # Lưu trữ triples
             sentence_triples[sentence_idx] = triples
@@ -863,7 +862,7 @@ def extract_triples(sentences):
             print(f"  Đang xử lý câu {i+1}/{len(sentences)} - {(i+1)/len(sentences)*100:.1f}% - ETA: {eta:.1f}s", end="\r")
             
         # Trích xuất triples từ câu
-        triples = extract_triples_for_search(sentence)
+        triples = extract_relations_from_paragraph(sentence, use_enhanced_settings=True)
         
         # Lưu trữ triples
         sentence_triples.append(triples)
@@ -884,10 +883,11 @@ def chunk_passage_semantic_splitter(
     min_chunk_len: int = 2,
     max_chunk_len: int = 8,
     window_size: int = 3,
-    **kwargs # Bắt các tham số không dùng đến
-) -> List[Tuple[str, str]]:
+    **kwargs # Bắt các tham số không dùng đến, bao gồm device, include_oie, embedding_batch_size
+) -> List[Tuple[str, str, Optional[str]]]: # MODIFIED: Return type
     """
     Chunk một passage sử dụng logic Semantic Splitter (semantic_sequential_spreading).
+    Bao gồm tùy chọn OIE và quản lý device cho embedding.
 
     Args:
         doc_id (str): ID của document gốc.
@@ -899,35 +899,77 @@ def chunk_passage_semantic_splitter(
         min_chunk_len (int): Số câu tối thiểu trong chunk.
         max_chunk_len (int): Số câu tối đa trong chunk.
         window_size (int): Kích thước cửa sổ xem xét xu hướng.
+        **kwargs: Các tham số bổ sung như 'device', 'include_oie', 'embedding_batch_size'.
 
     Returns:
-        List[Tuple[str, str]]: Danh sách các tuple (chunk_id, chunk_text).
+        List[Tuple[str, str, Optional[str]]]: Danh sách các tuple (chunk_id, chunk_text, oie_string).
     """
-    chunks_result = []
+    chunks_result: List[Tuple[str, str, Optional[str]]] = [] # MODIFIED: Type hint for result
+
+    # Extract params from kwargs
+    device = kwargs.get('device')
+    embedding_batch_size = kwargs.get('embedding_batch_size', 32) # Default batch size for embedding
+    include_oie = kwargs.get('include_oie', False)
+
+    print(f"  SemanticSplitter: Processing doc_id {doc_id}...")
+    print(f"  SemanticSplitter: Using device: {device} for embeddings.")
+    print(f"  SemanticSplitter: Embedding batch size: {embedding_batch_size}")
+    print(f"  SemanticSplitter: Include OIE: {include_oie}")
+
     try:
         # a. Tách câu
-        sentences = extract_and_simplify_sentences(passage_text, simplify=False) # Dùng simplify=False để giữ nguyên câu gốc
-        if not sentences:
-            return []
-        if len(sentences) == 1: # Nếu chỉ có 1 câu, coi đó là 1 chunk
-            chunk_text = sentences[0]
-            chunk_hash = hashlib.md5(chunk_text.encode()).hexdigest()[:10]
-            chunk_id = f"{doc_id}_{chunk_hash}"
-            return [(chunk_id, chunk_text)]
+        sentences = extract_and_simplify_sentences(passage_text, simplify=False)
+        
+        oie_string_single_chunk = None
+        if include_oie and passage_text.strip():
+            try:
+                relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                if relations:
+                    oie_string_single_chunk = format_oie_triples_to_string(relations)
+            except Exception as e_oie_single:
+                print(f"  Error during OIE for single chunk (splitter) for doc {doc_id}: {e_oie_single}")
 
-        # b. Tạo embedding cho câu (Sử dụng hàm import từ Tool)
-        # Lưu ý: Hàm to_vectors gốc trong file này có thể khác,
-        # nên dùng hàm chuẩn hóa từ Tool nếu có thể.
-        # Giả sử dùng hàm sentence_embedding từ Tool
+        if not sentences:
+            print(f"  SemanticSplitter: No sentences found for doc {doc_id}. Returning empty passage as a single chunk.")
+            # Return the whole passage as one chunk if it's not empty, or an empty chunk
+            chunk_id_empty = f"{doc_id}_splitter_chunk0_empty"
+            return [(chunk_id_empty, passage_text, oie_string_single_chunk)]
+
+        if len(sentences) == 1:
+            print(f"  SemanticSplitter: Only one sentence found for doc {doc_id}. Returning as a single chunk.")
+            chunk_text = sentences[0]
+            # Use consistent hashing
+            try:
+                chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
+            except Exception:
+                chunk_hash = "nohash"
+            chunk_id = f"{doc_id}_splitter_chunk0_hash{chunk_hash}"
+            return [(chunk_id, chunk_text, oie_string_single_chunk)] # oie_string_single_chunk is for the whole passage
+
+        # b. Tạo embedding cho câu
+        # Import locally as it might not be at the top or could be shadowed
         from Tool.Sentence_Embedding import sentence_embedding as embed_text_list_tool
-        sentence_vectors = embed_text_list_tool(sentences, model_name=model_name)
-        if sentence_vectors is None: return []
+        
+        sentence_vectors = embed_text_list_tool(
+            sentences,
+            model_name_or_path=model_name, # embed_text_list_tool uses model_name_or_path
+            batch_size=embedding_batch_size, # Pass batch_size
+            device=device # Pass device
+        )
+        
+        if sentence_vectors is None:
+            print(f"  SemanticSplitter: Failed to get sentence vectors for doc {doc_id}. Returning single chunk.")
+            chunk_id_fail_embed = f"{doc_id}_splitter_chunk0_embedfail"
+            return [(chunk_id_fail_embed, passage_text, oie_string_single_chunk)]
 
         # c. Tạo ma trận tương đồng
-        sim_matrix = create_semantic_matrix(sentence_vectors) # Dùng hàm trong file này
+        sim_matrix = create_semantic_matrix(sentence_vectors)
+        if sim_matrix is None or sim_matrix.size == 0:
+            print(f"  SemanticSplitter: Failed to create similarity matrix for doc {doc_id}. Returning single chunk.")
+            chunk_id_fail_matrix = f"{doc_id}_splitter_chunk0_matrixfail"
+            return [(chunk_id_fail_matrix, passage_text, oie_string_single_chunk)]
 
         # d. Phân đoạn tuần tự
-        # Lưu ý: Hàm này không có chế độ 'auto', cần truyền giá trị cụ thể
         segments = semantic_sequential_spreading(
             sentences, sim_matrix,
             initial_threshold=initial_threshold,
@@ -939,31 +981,65 @@ def chunk_passage_semantic_splitter(
         )
 
         # e. Tạo chunk từ các đoạn
-        for segment_idx, segment in enumerate(segments):
-            chunk_sentences = [sentences[sent_idx] for sent_idx in segment]
+        if not segments: # Handle case where semantic_sequential_spreading returns no segments
+            print(f"  SemanticSplitter: No segments created for doc {doc_id}. Returning single chunk.")
+            chunk_id_no_segments = f"{doc_id}_splitter_chunk0_nosegments"
+            return [(chunk_id_no_segments, passage_text, oie_string_single_chunk)]
+
+        for segment_idx, segment_indices in enumerate(segments):
+            chunk_sentences = [sentences[sent_idx] for sent_idx in segment_indices]
             chunk_text = " ".join(chunk_sentences).strip()
+            
             if chunk_text:
-                # Sử dụng hashlib.sha1 cho nhất quán với Semantic_Grouping.py và ngắn hơn
                 try:
                     chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
                 except Exception:
-                    chunk_hash = "nohash" # Fallback
-                chunk_id = f"{doc_id}_splitter_chunk{segment_idx}_hash{chunk_hash}" # Thêm segment_idx và "splitter"
-                chunks_result.append((chunk_id, chunk_text))
+                    chunk_hash = "nohash"
+                chunk_id = f"{doc_id}_splitter_chunk{segment_idx}_hash{chunk_hash}"
+                
+                oie_string_for_chunk = None
+                if include_oie:
+                    try:
+                        relations = extract_relations_from_paragraph(chunk_text, use_enhanced_settings=True)
+                        if relations:
+                            oie_string_for_chunk = format_oie_triples_to_string(relations)
+                    except Exception as e_oie_group:
+                        print(f"  Error during OIE extraction for splitter group {chunk_id}: {e_oie_group}")
+                
+                chunks_result.append((chunk_id, chunk_text, oie_string_for_chunk))
 
     except Exception as e:
         print(f"Error chunking doc {doc_id} with Semantic Splitter: {e}")
         import traceback
         traceback.print_exc()
+        # Fallback to returning the original passage as a single chunk with potential OIE
+        oie_fallback = None
+        if include_oie and passage_text.strip():
+             try:
+                relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                if relations: oie_fallback = format_oie_triples_to_string(relations)
+             except: pass # Ignore OIE error in this deep fallback
+        return [(f"{doc_id}_splitter_chunk0_error", passage_text, oie_fallback)]
+        
+    if not chunks_result: # If, after all processing, chunks_result is empty, return the original passage
+        print(f"  SemanticSplitter: No chunks were generated for doc {doc_id} after processing. Returning original passage.")
+        oie_fallback_empty_result = None
+        if include_oie and passage_text.strip():
+             try:
+                relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                if relations: oie_fallback_empty_result = format_oie_triples_to_string(relations)
+             except: pass
+        return [(f"{doc_id}_splitter_chunk0_noresult", passage_text, oie_fallback_empty_result)]
+
     return chunks_result
 
 # --- THÊM HÀM HELPER CHO BATCH EMBEDDING (tương tự Semantic_Grouping.py) ---
-def embed_sentences_in_batches_splitter(sentences: List[str], model_name: str, batch_size: int = 32) -> Optional[np.ndarray]:
+def embed_sentences_in_batches_splitter(sentences: List[str], model_name: str, batch_size: int = 32, device: Optional[object] = None) -> Optional[np.ndarray]: # Added device
     """Nhúng danh sách câu theo lô để giảm sử dụng bộ nhớ."""
     if not sentences:
         return None
-    all_embeddings = []
-    print(f"  SemanticSplitter: Embedding {len(sentences)} sentences in batches of {batch_size} using {model_name}...")
+    all_embeddings = [] # This variable is not directly used to build the final array anymore
+    print(f"  SemanticSplitter: Embedding {len(sentences)} sentences in batches of {batch_size} using {model_name} on device {device}...") # MODIFIED: Log device
     try:
         # Sử dụng trực tiếp hàm sentence_embedding đã import với alias embed_text_list_tool
         # Hàm sentence_embedding đã có xử lý batch_size nội bộ qua model.encode
@@ -973,7 +1049,8 @@ def embed_sentences_in_batches_splitter(sentences: List[str], model_name: str, b
         embeddings_array = embed_text_list_tool(
             sentences, 
             model_name_or_path=model_name, 
-            batch_size=batch_size # Truyền batch_size vào đây
+            batch_size=batch_size, # Truyền batch_size vào đây
+            device=device # MODIFIED: Pass device
         )
         
         # print(f"    Finished embedding {len(sentences)} sentences.         ") # Xóa dòng này nếu sentence_embedding có show_progress_bar
@@ -996,7 +1073,22 @@ def embed_sentences_in_batches_splitter(sentences: List[str], model_name: str, b
             del all_embeddings
         gc.collect()
         return None
-# --- KẾT THÚC HÀM HELPER ---
+
+# --- ADD HELPER FUNCTION TO FORMAT OIE TRIPLES (similar to Semantic_Grouping.py) ---
+def format_oie_triples_to_string(triples_list: List[Dict[str, str]]) -> str:
+    if not triples_list:
+        return ""
+    formatted_triples = []
+    for triple in triples_list:
+        s = str(triple.get('subject', '')).replace('\\t', ' ').replace('\\n', ' ').strip()
+        r = str(triple.get('relation', '')).replace('\\t', ' ').replace('\\n', ' ').strip()
+        o = str(triple.get('object', '')).replace('\\t', ' ').replace('\\n', ' ').strip()
+        if s and r and o: # Only include complete triples
+            formatted_triples.append(f"({s}; {r}; {o})")
+    if not formatted_triples:
+        return ""
+    return " [OIE_TRIPLES] " + " | ".join(formatted_triples) + " [/OIE_TRIPLES]"
+# --- END HELPER FUNCTION ---
 
 # --- SỬA ĐỔI HÀM CHUNKING CHÍNH ---
 def chunk_passage_semantic_splitter(
@@ -1009,47 +1101,83 @@ def chunk_passage_semantic_splitter(
     min_chunk_len: int = 2,
     max_chunk_len: int = 8,
     window_size: int = 3,
-    embedding_batch_size: int = 32, # <-- THAM SỐ MỚI
-    **kwargs 
-) -> List[Tuple[str, str]]:
+    embedding_batch_size: int = 32, # Added for consistency
+    include_oie: bool = False,      # Added include_oie flag
+    **kwargs
+) -> List[Tuple[str, str, Optional[str]]]: # MODIFIED: Return type and OIE logic
+    """
+    Chunk một passage sử dụng logic Semantic Splitter (semantic_sequential_spreading).
+    Bao gồm tùy chọn OIE và quản lý device cho embedding.
+
+    Args:
+        doc_id (str): ID của document gốc.
+        passage_text (str): Nội dung của passage.
+        model_name (str): Tên model embedding.
+        initial_threshold (float): Ngưỡng ban đầu.
+        decay_factor (float): Hệ số giảm ngưỡng.
+        min_threshold (float): Ngưỡng tối thiểu.
+        min_chunk_len (int): Số câu tối thiểu trong chunk.
+        max_chunk_len (int): Số câu tối đa trong chunk.
+        window_size (int): Kích thước cửa sổ xem xét xu hướng.
+        embedding_batch_size (int): Kích thước lô cho nhúng (mặc định 32).
+        include_oie (bool): Có bao gồm trích xuất OIE cho từng chunk hay không.
+        **kwargs: Các tham số bổ sung khác.
+
+    Returns:
+        List[Tuple[str, str, Optional[str]]]: Danh sách các tuple (chunk_id, chunk_text, oie_string).
+    """
     chunks_result = []
-    sentences = None
-    sentence_vectors = None
-    sim_matrix = None
-    segments = None
+    device = kwargs.get('device')
+    print(f"Processing passage ID: {doc_id} on device {device}...")
+    
     try:
+        # a. Tách câu
         sentences = extract_and_simplify_sentences(passage_text, simplify=False)
-        if not sentences: return []
+        
+        oie_string_single = None
+        if include_oie and passage_text.strip():
+            try:
+                relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                if relations:
+                    oie_string_single = format_oie_triples_to_string(relations)
+            except Exception as e:
+                print(f"  Error during OIE for single chunk (Semantic Splitter): {e}")
+
+        if not sentences:
+            print(f"  No sentences found for doc {doc_id}. Returning empty passage as a single chunk.")
+            return [(f"{doc_id}_splitter_chunk0_empty", passage_text, oie_string_single)]
+
         if len(sentences) == 1:
+            print(f"  Only one sentence found for doc {doc_id}. Returning as a single chunk.")
             chunk_text = sentences[0]
-            chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
+            try:
+                chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
+            except Exception:
+                chunk_hash = "nohash"
             chunk_id = f"{doc_id}_splitter_chunk0_hash{chunk_hash}"
-            del sentences
-            gc.collect()
-            return [(chunk_id, chunk_text)]
+            return [(chunk_id, chunk_text, oie_string_single)]
 
-        # b. Tạo embedding cho câu THEO BATCH
-        sentence_vectors = embed_sentences_in_batches_splitter(
-            sentences, 
-            model_name=model_name, 
-            batch_size=embedding_batch_size # Sử dụng batch size
+        # b. Tạo embedding cho câu
+        from Tool.Sentence_Embedding import sentence_embedding as embed_text_list_tool
+        
+        sentence_vectors = embed_text_list_tool(
+            sentences,
+            model_name_or_path=model_name,
+            batch_size=embedding_batch_size,
+            device=device
         )
-        if sentence_vectors is None: 
-            del sentences
-            gc.collect()
-            return []
+        
+        if sentence_vectors is None:
+            print(f"  Failed to get sentence vectors for doc {doc_id}. Returning single chunk.")
+            return [(f"{doc_id}_splitter_chunk0_embedfail", passage_text, oie_string_single)]
 
+        # c. Tạo ma trận tương đồng
         sim_matrix = create_semantic_matrix(sentence_vectors)
-        del sentence_vectors # Giải phóng vectors sau khi có sim_matrix
-        gc.collect()
+        if sim_matrix is None or sim_matrix.size == 0:
+            print(f"  Failed to create similarity matrix for doc {doc_id}. Returning single chunk.")
+            return [(f"{doc_id}_splitter_chunk0_matrixfail", passage_text, oie_string_single)]
 
-        if sim_matrix is None or sim_matrix.size == 0 : # Kiểm tra sim_matrix rỗng
-            del sentences
-            if sim_matrix is not None: del sim_matrix
-            gc.collect()
-            return []
-
-
+        # d. Phân đoạn tuần tự
         segments = semantic_sequential_spreading(
             sentences, sim_matrix,
             initial_threshold=initial_threshold,
@@ -1059,35 +1187,55 @@ def chunk_passage_semantic_splitter(
             max_chunk_len=max_chunk_len,
             window_size=window_size
         )
-        del sim_matrix # Giải phóng sim_matrix
-        gc.collect()
+
+        # e. Tạo chunk từ các đoạn
+        if not segments:
+            print(f"  No segments created for doc {doc_id}. Returning single chunk.")
+            return [(f"{doc_id}_splitter_chunk0_nosegments", passage_text, oie_string_single)]
 
         for segment_idx, segment_indices in enumerate(segments):
-            if not segment_indices: continue
-            chunk_sents = [sentences[sent_idx] for sent_idx in sorted(segment_indices)]
-            chunk_text = " ".join(chunk_sents).strip()
+            chunk_sentences = [sentences[sent_idx] for sent_idx in segment_indices]
+            chunk_text = " ".join(chunk_sentences).strip()
+            
             if chunk_text:
                 try:
                     chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
                 except Exception:
                     chunk_hash = "nohash"
                 chunk_id = f"{doc_id}_splitter_chunk{segment_idx}_hash{chunk_hash}"
-                chunks_result.append((chunk_id, chunk_text))
-            del chunk_sents
-            del chunk_text
-        
-        del sentences
-        del segments
-        gc.collect()
+                
+                oie_string_for_chunk = None
+                if include_oie:
+                    try:
+                        relations = extract_relations_from_paragraph(chunk_text, use_enhanced_settings=True)
+                        if relations:
+                            oie_string_for_chunk = format_oie_triples_to_string(relations)
+                    except Exception as e:
+                        print(f"  Error during OIE extraction for chunk {chunk_id}: {e}")
+                
+                chunks_result.append((chunk_id, chunk_text, oie_string_for_chunk))
 
     except Exception as e:
         print(f"Error chunking doc {doc_id} with Semantic Splitter: {e}")
         import traceback
         traceback.print_exc()
-        # Dọn dẹp nếu có lỗi
-        if sentences is not None: del sentences
-        if sentence_vectors is not None: del sentence_vectors
-        if sim_matrix is not None: del sim_matrix
-        if segments is not None: del segments
-        gc.collect()
+        # Fallback to returning the original passage as a single chunk with potential OIE
+        oie_fallback = None
+        if include_oie and passage_text.strip():
+             try:
+                relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                if relations: oie_fallback = format_oie_triples_to_string(relations)
+             except: pass # Ignore OIE error in this deep fallback
+        return [(f"{doc_id}_splitter_chunk0_error", passage_text, oie_fallback)]
+        
+    if not chunks_result:
+        print(f"  No chunks were generated for doc {doc_id} after processing. Returning original passage.")
+        oie_fallback_empty_result = None
+        if include_oie and passage_text.strip():
+             try:
+                relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                if relations: oie_fallback_empty_result = format_oie_triples_to_string(relations)
+             except: pass
+        return [(f"{doc_id}_splitter_chunk0_noresult", passage_text, oie_fallback_empty_result)]
+
     return chunks_result

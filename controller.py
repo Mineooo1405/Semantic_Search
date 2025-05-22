@@ -16,7 +16,7 @@ COMMON_DEFAULTS = {
     "output_dir": "D:/SemanticSearch/TrainingData_MatchZoo_BEIR",
     "embedding_model": "thenlper/gte-large",
     "max_triplets": "0", # 0 for unlimited
-    "max_docs": "20",
+    "max_docs": "20000",
     "random_seed": "42",
     "split_type": "train"
 }
@@ -27,22 +27,22 @@ SEMANTIC_GROUPING_DEFAULTS = {
     "min_threshold": "auto",
     "initial_percentile": "95",
     "min_percentile": "10",
-    "embedding_batch_size": "24"
+    "embedding_batch_size": "32"
 }
 
 SEMANTIC_SPLITTER_DEFAULTS = {
     "initial_threshold": "0.6",
-    "decay_factor": "0.95",
-    "min_threshold": "0.35",
-    "min_chunk_len": "2",
+    "decay_factor": "0.85",
+    "min_threshold": "0.10",
+    "min_chunk_len": "1",
     "max_chunk_len": "8",
     "window_size": "3",
     "embedding_batch_size": "32"
 }
 
 TEXT_SPLITTER_DEFAULTS = {
-    "chunk_size": "1000",
-    "chunk_overlap": "200"
+    "chunk_size": "500",
+    "chunk_overlap": "150"
 }
 
 # Define the sequence of runs
@@ -121,7 +121,7 @@ def run_main_script(config: dict):
             text=True,  # Ensures stdin/stdout/stderr are treated as text
             cwd=os.path.dirname(os.path.abspath(__file__)) # Run from controller's directory
         )
-        stdout, stderr = process.communicate(input=input_sequence, timeout=7200) # 2 hour timeout
+        stdout, stderr = process.communicate(input=input_sequence, timeout=86400) # 2 hour timeout
 
         print("--- STDOUT ---")
         print(stdout)

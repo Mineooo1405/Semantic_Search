@@ -5,7 +5,9 @@ import matchzoo as mz
 import nltk
 import os
 from pathlib import Path
-from transform_data import transform_to_matchzoo_format #
+import json # ADDED for saving config
+from datetime import datetime # ADDED for saving config
+
 
 print(f"MatchZoo version: {mz.__version__}")
 print(f"PyTorch version: {torch.__version__}")
@@ -13,9 +15,9 @@ print(f"NumPy version: {np.__version__}")
 print(f"Pandas version: {pd.__version__}")
 
 # --- Script Configuration ---
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_triplets.tsv"
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv"
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv"
+TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
+DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
+TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
 
 EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt"
 EMBEDDING_DIMENSION = 100 
@@ -23,7 +25,8 @@ EMBEDDING_DIMENSION = 100
 OUTPUT_DIR = Path("D:/SemanticSearch/trained_arci_model")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_SAVE_PATH = OUTPUT_DIR / "arci_model.pt"
-PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "arci_preprocessor.dill"
+# PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "arci_preprocessor.dill" # Will be saved in OUTPUT_DIR
+CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json" # ADDED: Path for the config file
 
 FIXED_LENGTH_LEFT = 10
 FIXED_LENGTH_RIGHT = 100
@@ -44,6 +47,16 @@ except LookupError:
     except Exception as e:
         print(f"Failed to download 'punkt': {e}. Please ensure NLTK can download data or install 'punkt' manually.")
         exit(1)
+
+# --- Helper function to safely get parameter values (copied from other scripts) ---
+def safe_get_param_value(params_table, key, default_val):
+    if key in params_table: # Check if key exists
+        val = params_table[key] # Retrieve item, should be the value due to ParamTable.__getitem__
+        # Defensive check: if somehow a Param object itself is returned by __getitem__
+        if isinstance(val, mz.engine.param.Param):
+            return val.value
+        return val # Assumed to be the actual value
+    return default_val
 
 # --- Task Definition ---
 print("Defining ranking task for ArcI...")
@@ -91,13 +104,9 @@ if not source_dev_data:
     print("CRITICAL: Development/Validation data is empty. Exiting.")
     exit(1)
 
-transformed_train_data = transform_to_matchzoo_format(source_train_data)
-transformed_dev_data = transform_to_matchzoo_format(source_dev_data)
-transformed_test_data = transform_to_matchzoo_format(source_test_data)
-
-train_df = pd.DataFrame(transformed_train_data, columns=['text_left', 'text_right', 'label'])
-dev_df = pd.DataFrame(transformed_dev_data, columns=['text_left', 'text_right', 'label'])
-test_df = pd.DataFrame(transformed_test_data, columns=['text_left', 'text_right', 'label'])
+train_df = pd.DataFrame(source_train_data, columns=['text_left', 'text_right', 'label'])
+dev_df = pd.DataFrame(source_dev_data, columns=['text_left', 'text_right', 'label'])
+test_df = pd.DataFrame(source_test_data, columns=['text_left', 'text_right', 'label'])
 
 # Create MatchZoo DataPacks
 train_pack_raw = mz.pack(train_df, task=ranking_task)
@@ -229,13 +238,96 @@ print(f"Starting ArcI model training for {EPOCHS} epochs...")
 trainer.run()
 print("Training finished.")
 
-# --- Save Model and Preprocessor ---
+# --- Consolidate Artifact Saving ---
+print("Preparing and saving model, preprocessor, and config...")
+
+# 1. Create Config Dictionary
+config_to_save = {
+    "model_name": "ArcI",
+    "model_class": model.__class__.__name__,
+    "task_type": ranking_task.__class__.__name__,
+    "loss_function_class": ranking_task.losses[0].__class__.__name__,
+    "loss_params": { # Specific to RankHingeLoss
+        "margin": ranking_task.losses[0]._margin if hasattr(ranking_task.losses[0], '_margin') else 1.0,
+        "strict": ranking_task.losses[0]._strict if hasattr(ranking_task.losses[0], '_strict') else False
+    },
+    "optimizer_class": optimizer.__class__.__name__,
+    "optimizer_params": optimizer.defaults,
+    "model_hyperparameters_used": {
+        "left_length": safe_get_param_value(model.params, 'left_length', FIXED_LENGTH_LEFT),
+        "right_length": safe_get_param_value(model.params, 'right_length', FIXED_LENGTH_RIGHT),
+        "left_filters": safe_get_param_value(model.params, 'left_filters', [128]),
+        "left_kernel_sizes": safe_get_param_value(model.params, 'left_kernel_sizes', [3]),
+        "left_pool_sizes": safe_get_param_value(model.params, 'left_pool_sizes', [4]),
+        "right_filters": safe_get_param_value(model.params, 'right_filters', [128]),
+        "right_kernel_sizes": safe_get_param_value(model.params, 'right_kernel_sizes', [3]),
+        "right_pool_sizes": safe_get_param_value(model.params, 'right_pool_sizes', [4]),
+        "conv_activation_func": safe_get_param_value(model.params, 'conv_activation_func', 'relu'),
+        "mlp_num_layers": safe_get_param_value(model.params, 'mlp_num_layers', 1),
+        "mlp_num_units": safe_get_param_value(model.params, 'mlp_num_units', 100),
+        "mlp_num_fan_out": safe_get_param_value(model.params, 'mlp_num_fan_out', 1),
+        "mlp_activation_func": safe_get_param_value(model.params, 'mlp_activation_func', 'relu'),
+        "dropout_rate": safe_get_param_value(model.params, 'dropout_rate', 0.9),
+        "embedding_input_dim_from_matrix_shape": embedding_matrix.shape[0] if embedding_matrix is not None else None,
+        "embedding_output_dim_from_matrix_shape": embedding_matrix.shape[1] if embedding_matrix is not None else None,
+    },
+    "embedding_source_file": EMBEDDING_FILE_PATH if 'EMBEDDING_FILE_PATH' in globals() and EMBEDDING_FILE_PATH and os.path.exists(EMBEDDING_FILE_PATH) else "random_dummy_embeddings_or_not_specified",
+    "embedding_dim_configured": EMBEDDING_DIMENSION,
+    "batch_size": BATCH_SIZE,
+    "epochs_configured": EPOCHS,
+    "epochs_completed": trainer._epoch if hasattr(trainer, '_epoch') else 0,
+    "patience_used": trainer._early_stopping.patience if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'patience') else None, # ArcI trainer might use default patience
+    "validate_interval": trainer._validate_interval if hasattr(trainer, '_validate_interval') else None,
+    "early_stopping_key": trainer._early_stopping.key if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'key') else None,
+    "device_used_for_training": str(trainer._device) if hasattr(trainer, '_device') else None,
+    "trainer_verbose_level": trainer._verbose if hasattr(trainer, '_verbose') else 1,
+    "preprocessor_context": {
+        "fixed_length_left": preprocessor.context.get('fixed_length_left'),
+        "fixed_length_right": preprocessor.context.get('fixed_length_right'),
+        "filter_mode": preprocessor.context.get('filter_unit')._state.get('mode') if preprocessor.context.get('filter_unit') and hasattr(preprocessor.context.get('filter_unit'), '_state') else None,
+        "filter_low_freq": preprocessor.context.get('filter_unit')._state.get('low_freq') if preprocessor.context.get('filter_unit') and hasattr(preprocessor.context.get('filter_unit'), '_state') else None,
+        "vocab_size": preprocessor.context.get('vocab_size'),
+        "embedding_input_dim": preprocessor.context.get('embedding_input_dim'), 
+        "vocab_path": None, # Initialize to None
+    },
+    "matchzoo_version": mz.__version__,
+    "pytorch_version": torch.__version__,
+    "numpy_version": np.__version__,
+    "pandas_version": pd.__version__,
+    "training_script": os.path.basename(__file__),
+    "training_date": datetime.now().isoformat(),
+    "output_directory": str(OUTPUT_DIR.resolve())
+}
+
+# Get vocab_path safely (Python 3.7 compatible)
+vocab_unit_object = preprocessor.context.get('vocab_unit')
+if vocab_unit_object and hasattr(vocab_unit_object, 'state') and isinstance(vocab_unit_object.state, dict):
+    term_index_path_value = vocab_unit_object.state.get('term_index_path')
+    if term_index_path_value:
+        config_to_save["preprocessor_context"]["vocab_path"] = str(Path(term_index_path_value).resolve())
+
+# Ensure all values in model_hyperparameters_used are serializable
+for key, value in config_to_save.get("model_hyperparameters_used", {}).items():
+    if hasattr(value, 'item'): # For numpy types
+        config_to_save["model_hyperparameters_used"][key] = value.item()
+
+# 2. Save Config
+with open(CONFIG_SAVE_PATH, 'w', encoding='utf-8') as f:
+    json.dump(config_to_save, f, indent=4)
+print(f"Config saved to {CONFIG_SAVE_PATH}")
+
+# 3. Save Model
 print(f"Saving model to: {MODEL_SAVE_PATH}")
 torch.save(model.state_dict(), MODEL_SAVE_PATH) 
-print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}")
-preprocessor.save(PREPROCESSOR_SAVE_PATH) 
 
-print("ArcI training script finished successfully.")
+# 4. Save Preprocessor
+# preprocessor.save() expects a directory and saves "preprocessor.dill" within it.
+preprocessor_file_in_output_dir = OUTPUT_DIR / "preprocessor.dill"
+print(f"Saving preprocessor to directory: {OUTPUT_DIR} (will be saved as {preprocessor_file_in_output_dir})")
+preprocessor.save(OUTPUT_DIR) # Pass the directory
+
+print("\\nArcI training script finished successfully.")
 print(f"Model saved at: {MODEL_SAVE_PATH}")
-print(f"Preprocessor saved at: {PREPROCESSOR_SAVE_PATH}")
+print(f"Preprocessor saved at: {preprocessor_file_in_output_dir}") # Updated path
+print(f"Config saved at: {CONFIG_SAVE_PATH}")
 

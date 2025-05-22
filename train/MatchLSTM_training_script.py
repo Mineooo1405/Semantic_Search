@@ -5,7 +5,22 @@ import numpy as np
 import torch
 import os
 from pathlib import Path
-from transform_data import transform_to_matchzoo_format
+# from transform_data import transform_to_matchzoo_format
+import json # ADDED for saving config
+import dill # ADDED for saving preprocessor explicitly
+
+# --- Helper function to safely get parameter values ---
+def safe_get_param_value(params_table, key, default_val):
+    if key in params_table: # Check if key exists
+        val = params_table[key] # Retrieve item, should be the value due to ParamTable.__getitem__
+        # Defensive check: if somehow a Param object itself is returned by __getitem__
+        if isinstance(val, mz.engine.param.Param):
+            # This case should ideally not happen if ParamTable.__getitem__ works as documented (returns .value)
+            # print(f"DEBUG: Param object was returned by __getitem__ for {key}, accessing .value")
+            return val.value
+        return val # Assumed to be the actual value
+    # print(f"DEBUG: Key \'{key}\' not found in model.params. Using default: {default_val}")
+    return default_val
 
 # --- Setup NLTK ---
 try:
@@ -52,21 +67,21 @@ def load_triplet_data_from_tsv(file_path):
 
 # --- Load CUSTOM Dataset ---
 print("Loading CUSTOM dataset.")
-train_file_path = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_triplets.tsv"
-dev_file_path = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv"
-test_file_path = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/dev.tsv" # Using dev for test
+train_file_path = r"D:\SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
+dev_file_path = r"D:\SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
+test_file_path = r"D:\SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" # Using dev for test
 
 source_train_data = load_triplet_data_from_tsv(train_file_path)
 source_dev_data = load_triplet_data_from_tsv(dev_file_path)
 source_test_data = load_triplet_data_from_tsv(test_file_path)
 
-transformed_train_data = transform_to_matchzoo_format(source_train_data)
-transformed_dev_data = transform_to_matchzoo_format(source_dev_data)
-transformed_test_data = transform_to_matchzoo_format(source_test_data)
+# transformed_train_data = transform_to_matchzoo_format(source_train_data)
+# transformed_dev_data = transform_to_matchzoo_format(source_dev_data)
+# transformed_test_data = transform_to_matchzoo_format(source_test_data)
 
-train_df = pd.DataFrame(transformed_train_data, columns=['text_left', 'text_right', 'label'])
-dev_df = pd.DataFrame(transformed_dev_data, columns=['text_left', 'text_right', 'label'])
-test_df = pd.DataFrame(transformed_test_data, columns=['text_left', 'text_right', 'label'])
+train_df = pd.DataFrame(source_train_data, columns=['text_left', 'text_right', 'label'])
+dev_df = pd.DataFrame(source_dev_data, columns=['text_left', 'text_right', 'label'])
+test_df = pd.DataFrame(source_test_data, columns=['text_left', 'text_right', 'label'])
 
 if not train_df.empty:
     train_pack_raw = mz.pack(train_df)
@@ -213,15 +228,15 @@ print(f'Trainable parameters: {trainable_params}')
 # --- Trainer Setup ---
 print("Setting up Trainer...")
 optimizer = torch.optim.Adadelta(model.parameters())
-
+NUM_TRAIN_EPOCHS = 10 # ADDED: Define configured epochs
 trainer = mz.trainers.Trainer(
     model=model,
     optimizer=optimizer,
     trainloader=trainloader,
     validloader=validloader,
     validate_interval=None,
-    epochs=10,
-    patience=5 # Added patience
+    epochs=NUM_TRAIN_EPOCHS, # CHANGED: Use the variable
+    patience=NUM_TRAIN_EPOCHS # Added patience
 )
 print("Trainer configured.")
 
@@ -230,19 +245,104 @@ print("Starting MatchLSTM model training...")
 trainer.run()
 print("MatchLSTM model training finished.")
 
-# --- Save Model and Preprocessor ---
-print("Saving model and preprocessor...")
-MODEL_SAVE_DIR = "trained_matchlstm_model" # Defined MODEL_SAVE_DIR
-MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, "model.pt") # Defined MODEL_SAVE_PATH
-PREPROCESSOR_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, "preprocessor.dill") # Defined PREPROCESSOR_SAVE_PATH
-
+# --- Consolidate Artifact Saving ---
+print("Preparing and saving model, preprocessor, and config...")
+MODEL_SAVE_DIR = "trained_matchlstm_model"
 os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
 
-torch.save(model.state_dict(), MODEL_SAVE_PATH) # Used defined path
-print(f"Model saved to {MODEL_SAVE_PATH}")
+MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, "model.pt")
+PREPROCESSOR_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, "preprocessor.dill")
+CONFIG_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, "config.json")
 
-preprocessor.save(PREPROCESSOR_SAVE_PATH) # Used defined path
-print(f"Preprocessor saved to {PREPROCESSOR_SAVE_PATH}")
+# 1. Create Config Dictionary
+# This uses the `preprocessor` object that was fitted by the initial `fit_transform(train_pack_raw)`
+config_to_save = {
+    "model_name": "MatchLSTM",
+    "model_class": model.__class__.__name__,
+    "task_type": model.params['task'].__class__.__name__ if model.params['task'] else None,
+    "loss_function_class": model.params['task'].loss.__class__.__name__ if model.params['task'] and hasattr(model.params['task'], 'loss') else None,
+    "loss_num_neg": safe_get_param_value(model.params['task'].loss, '_num_neg', None) if model.params['task'] and hasattr(model.params['task'], 'loss') else None, # num_neg is an attribute not a Param
+    "optimizer_class": optimizer.__class__.__name__,
+    "learning_rate": optimizer.defaults.get('lr'), # optimizers are standard PyTorch, .defaults.get should be fine
+    "model_hyperparameters_used": {
+        "lstm_units": safe_get_param_value(model.params, 'lstm_units', 100),  # Default for MatchLSTM is 100
+        "mask_value": safe_get_param_value(model.params, 'mask_value', 0),    # Default for BasicModel is 0
+        "embedding_input_dim_model_param": safe_get_param_value(model.params, 'embedding_input_dim', None), # Should be set by embedding
+        "embedding_output_dim_model_param": safe_get_param_value(model.params, 'embedding_output_dim', None) # Should be set by embedding
+    },
+    "embedding_source_file": YOUR_EMBEDDING_FILE_PATH if 'YOUR_EMBEDDING_FILE_PATH' in globals() and os.path.exists(YOUR_EMBEDDING_FILE_PATH) else "random_dummy_embeddings",
+    "embedding_dim_used": YOUR_EMBEDDING_DIMENSION,
+    "batch_size": BATCH_SIZE,
+    "epochs_configured": NUM_TRAIN_EPOCHS,
+    "epochs_completed": trainer._epoch if hasattr(trainer, '_epoch') else 0,
+    "patience_used": trainer._early_stopping.patience if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'patience') else None,
+    "validate_interval": trainer._validate_interval if hasattr(trainer, '_validate_interval') else None,
+    "early_stopping_key": trainer._early_stopping.key if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'key') else None,
+    "device_used_for_training": str(trainer._device) if hasattr(trainer, '_device') else None,
+    "start_epoch_configured": trainer._start_epoch if hasattr(trainer, '_start_epoch') else 1,
+    "gradient_clip_norm": trainer._clip_norm if hasattr(trainer, '_clip_norm') else None,
+    "scheduler_class": trainer._scheduler.__class__.__name__ if hasattr(trainer, '_scheduler') and trainer._scheduler is not None else None,
+    "trainer_save_directory": str(trainer._save_dir.resolve()) if hasattr(trainer, '_save_dir') and trainer._save_dir is not None else None,
+    "trainer_save_all_flag": trainer._save_all if hasattr(trainer, '_save_all') else False,
+    "trainer_verbose_level": trainer._verbose if hasattr(trainer, '_verbose') else 1,
+    "fixed_length_left": preprocessor.context.get('fixed_length_left'),
+    "fixed_length_right": preprocessor.context.get('fixed_length_right'),
+    "vocab_size_from_preprocessor_context": preprocessor.context.get('vocab_size'),
+    "embedding_input_dim_from_preprocessor_context": preprocessor.context.get('embedding_input_dim'),
+    "matchzoo_version": mz.__version__,
+    "training_script": os.path.basename(__file__),
+    "training_date": pd.Timestamp.now().isoformat()
+}
+
+# Ensure all values in model_hyperparameters_used are serializable
+for key, value in config_to_save.get("model_hyperparameters_used", {}).items():
+    if isinstance(value, np.integer):
+        config_to_save["model_hyperparameters_used"][key] = int(value)
+    elif isinstance(value, np.floating):
+        config_to_save["model_hyperparameters_used"][key] = float(value)
+    elif isinstance(value, np.ndarray):
+        config_to_save["model_hyperparameters_used"][key] = value.tolist()
+    elif not isinstance(value, (str, int, float, bool, list, dict, type(None))):
+        config_to_save["model_hyperparameters_used"][key] = str(value)
+
+# 2. Save Config
+with open(CONFIG_SAVE_PATH, 'w', encoding='utf-8') as f:
+    json.dump(config_to_save, f, indent=4)
+print(f"Config saved to {CONFIG_SAVE_PATH}")
+
+# 3. Save Preprocessor (using the preprocessor from the initial fit_transform)
+print("DEBUG: Checking preprocessor context BEFORE saving preprocessor.dill:")
+print(f"DEBUG: preprocessor.context keys: {list(preprocessor.context.keys())}")
+term_index_found = False
+if 'vocab_unit' in preprocessor.context and hasattr(preprocessor.context['vocab_unit'], 'state') and 'term_index' in preprocessor.context['vocab_unit'].state:
+    term_index = preprocessor.context['vocab_unit'].state['term_index']
+    if term_index:
+        term_index_sample = list(term_index.items())
+        print(f"DEBUG: 'term_index' is PRESENT in preprocessor.context['vocab_unit'].state. Vocab size: {len(term_index_sample)}. Sample: {term_index_sample[:5]}")
+        term_index_found = True
+    else:
+        print("DEBUG: 'term_index' is EMPTY in preprocessor.context['vocab_unit'].state.")
+elif 'term_index' in preprocessor.context: # Fallback check if structure is different
+    term_index = preprocessor.context['term_index']
+    if term_index:
+        term_index_sample = list(term_index.items())
+        print(f"DEBUG: 'term_index' is PRESENT directly in preprocessor.context. Vocab size: {len(term_index_sample)}. Sample: {term_index_sample[:5]}")
+        term_index_found = True
+    else:
+        print("DEBUG: 'term_index' is EMPTY directly in preprocessor.context.")
+
+if term_index_found:
+    print(f"DEBUG: vocab_size from preprocessor.context: {preprocessor.context.get('vocab_size')}")
+    print(f"DEBUG: embedding_input_dim from preprocessor.context: {preprocessor.context.get('embedding_input_dim')}")
+    dill.dump(preprocessor, open(PREPROCESSOR_SAVE_PATH, 'wb'))
+    print(f"Preprocessor saved to {PREPROCESSOR_SAVE_PATH}")
+else:
+    print("DEBUG: CRITICAL - 'term_index' could NOT be found or was empty in preprocessor.context (checked both 'vocab_unit.state.term_index' and 'term_index').")
+    print(f"DEBUG: Preprocessor NOT saved to {PREPROCESSOR_SAVE_PATH}. This indicates an issue with the initial preprocessor.fit_transform or context propagation.")
+
+# 4. Save Model State
+torch.save(model.state_dict(), MODEL_SAVE_PATH)
+print(f"Model saved to {MODEL_SAVE_PATH}")
 
 print("Script finished.")
 

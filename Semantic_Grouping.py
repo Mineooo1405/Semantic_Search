@@ -1,68 +1,28 @@
 import pandas as pd
 from Tool.Database import connect_to_db # Keep for potential future use, but not for chunking function
-import json
-import numpy as np
 from dotenv import load_dotenv
-import os
 from Tool.Sentence_Detector import extract_and_simplify_sentences
 # Use the standard embedding function
 from Tool.Sentence_Embedding import sentence_embedding as embed_text_list # Assuming this handles model loading
-from Tool.OIE import extract_triples_for_search # Keep for potential future use
-import matplotlib.pyplot as plt # Keep for potential future use
-import seaborn as sns # Keep for potential future use
-import time
-import pickle # Keep for potential future use
-import spacy # Keep for potential future use
+from Tool.OIE import extract_relations_from_paragraph # MODIFIED: Changed import
+import os # Keep for potential future use
+import json # Keep for potential future use
+import time # Keep for potential future use
+import re # Keep for potential future use
 import nltk # For sentence tokenization
-import re
-import psycopg2 # Keep for potential future use
+import pickle # Keep for potential future use
 from psycopg2 import extras as psycopg2_extras # Keep for potential future use
 from pgvector.psycopg2 import register_vector # Keep for potential future use
-import hashlib
 from typing import List, Tuple, Dict, Union, Optional # Added Optional
 import gc # <-- IMPORT GARBAGE COLLECTOR
 from sklearn.metrics.pairwise import cosine_similarity # <-- IMPORT cosine_similarity
+import numpy as np # Ensure numpy is imported
+import matplotlib.pyplot as plt # For visualization
+import seaborn as sns # For visualization
+import hashlib # Added for generate_output_filename fallback
+# import traceback # Optional: for detailed error logging if needed
 
 load_dotenv()
-
-def process_oie_in_groups(sentences, groups):
-    """
-    Trích xuất OpenIE triples cho tất cả các câu trong các nhóm
-    
-    Args:
-        sentences: Danh sách các câu
-        groups: Danh sách các nhóm, mỗi nhóm chứa các chỉ số của câu
-        
-    Returns:
-        tuple: (all_triples, sentence_triples)
-            - all_triples: Danh sách tất cả các triples đã trích xuất
-            - sentence_triples: Danh sách các triples theo từng câu
-    """
-    print("\nĐang trích xuất quan hệ (OpenIE) cho các câu...")
-    
-    all_triples = []
-    sentence_triples = [[] for _ in range(len(sentences))]  # Danh sách triples cho mỗi câu
-    
-    # Hiển thị tiến độ
-    total = len(sentences)
-    start_time = time.time()
-    
-    for i, sentence in enumerate(sentences):
-        if i % 5 == 0 or i == total - 1:
-            elapsed = time.time() - start_time
-            eta = (elapsed / (i + 1)) * (total - i - 1) if i > 0 else 0
-            print(f"Trích xuất quan hệ: [{i+1}/{total}] - {(i+1)/total*100:.1f}% - ETA: {eta:.1f}s", end="\r")
-        
-        # Trích xuất triples cho câu
-        triples = extract_triples_for_search(sentence)
-        
-        # Lưu trữ triples
-        sentence_triples[i] = triples
-        all_triples.extend(triples)
-    
-    print(f"\nĐã trích xuất tổng cộng {len(all_triples)} quan hệ từ {total} câu")
-    
-    return all_triples, sentence_triples
 
 def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
     cache_file = f"{cache_prefix}{hash(str(sentences))}.pkl"
@@ -102,20 +62,20 @@ def to_vectors(sentences, use_cache=True, cache_prefix="passage_vectors_"):
     return vectors
 
 # --- Helper function for batched embedding ---
-def embed_sentences_in_batches(sentences: List[str], model_name: str, batch_size: int = 32) -> Optional[np.ndarray]:
+def embed_sentences_in_batches(sentences: List[str], model_name: str, batch_size: int = 32, device: Optional[object] = None) -> Optional[np.ndarray]: # Added device
     """Nhúng danh sách câu theo lô để giảm sử dụng bộ nhớ."""
     if not sentences:
         return None
     all_embeddings = []
-    print(f"  Embedding {len(sentences)} sentences in batches of {batch_size}...") # Add print
+    print(f"  Embedding {len(sentences)} sentences in batches of {batch_size} on device {device}...") # Add print
     try:
         num_batches = (len(sentences) + batch_size - 1) // batch_size
         for i in range(0, len(sentences), batch_size):
             batch_num = (i // batch_size) + 1
             print(f"    Embedding batch {batch_num}/{num_batches}...", end='\r')
             batch = sentences[i:i+batch_size]
-            # Gọi hàm nhúng gốc, truyền model_name nếu cần
-            batch_embeddings = embed_text_list(batch, model_name_or_path=model_name) # Pass model_name
+            # Gọi hàm nhúng gốc, truyền model_name và device nếu cần
+            batch_embeddings = embed_text_list(batch, model_name_or_path=model_name, device=device) # Pass model_name and device
             if batch_embeddings is not None:
                  # Chuyển đổi sang numpy array nếu cần và giải phóng tensor gốc (nếu có)
                  if hasattr(batch_embeddings, 'cpu'): # Check if it's a PyTorch tensor
@@ -147,7 +107,7 @@ def embed_sentences_in_batches(sentences: List[str], model_name: str, batch_size
         return None
 
 # --- Modified create_semantic_matrix ---
-def create_semantic_matrix(sentences: List[str], model_name: str, batch_size_embed: int = 32) -> Optional[np.ndarray]:
+def create_semantic_matrix(sentences: List[str], model_name: str, batch_size_embed: int = 32, device: Optional[object] = None) -> Optional[np.ndarray]: # Added device
     """
     Tạo ma trận tương đồng ngữ nghĩa giữa các câu, sử dụng embedding theo lô.
     """
@@ -155,7 +115,7 @@ def create_semantic_matrix(sentences: List[str], model_name: str, batch_size_emb
         return None
 
     # Nhúng câu theo lô
-    embeddings = embed_sentences_in_batches(sentences, model_name=model_name, batch_size=batch_size_embed)
+    embeddings = embed_sentences_in_batches(sentences, model_name=model_name, batch_size=batch_size_embed, device=device) # Pass device
 
     if embeddings is None or embeddings.shape[0] != len(sentences):
         print("  Error: Embedding failed or mismatch in number of embeddings.")
@@ -213,8 +173,7 @@ def analyze_similarity_distribution(sim_matrix):
              original_max = np.max(similarities) # Sẽ là 1.0
              return {
                 'min': original_max, 'max': original_max, 'mean': original_max, 'std': 0.0,
-                **{f'p{p}': original_max for p in [10, 25, 50, 75, 80, 85, 90, 95]}
-             }
+                **{f'p{p}': original_max for p in [10, 25, 50, 75, 80, 85, 90, 95]}}
         return None # Trường hợp không có cặp nào ban đầu
 
     # Tính toán thống kê trên các giá trị đã lọc
@@ -338,38 +297,44 @@ def visualize_similarity_matrix(matrix, groups=None, title="Semantic Similarity 
     plt.savefig('similarity_matrix_with_groups.png')
     plt.show()
 
-def display_oie_triples(groups, sentences, sentence_triples, max_display=3):
+def display_oie_triples(groups: List[List[int]], 
+                        sentences: List[str], 
+                        oie_results_by_group: List[List[Dict[str, str]]], 
+                        max_display_triples_per_group: int = 5):
     """
-    Hiển thị các triples được trích xuất từ các nhóm câu
+    Hiển thị các triples OIE được trích xuất cho mỗi nhóm câu.
     
     Args:
-        groups: Các nhóm câu
-        sentences: Danh sách các câu
-        sentence_triples: Danh sách triples theo từng câu
-        max_display: Số triples tối đa hiển thị cho mỗi câu
+        groups: Danh sách các nhóm (mỗi nhóm là danh sách chỉ số câu).
+        sentences: Danh sách tất cả các câu.
+        oie_results_by_group: Danh sách các kết quả OIE (mỗi phần tử là list các triple dict cho một nhóm).
+        max_display_triples_per_group: Số triples tối đa hiển thị cho mỗi nhóm.
     """
-    print("\n=== TRÍCH XUẤT QUAN HỆ THEO NHÓM ===")
+    print("\\n=== TRÍCH XUẤT QUAN HỆ THEO NHÓM (OIE Results per Group) ===")
     
-    for i, group in enumerate(groups):
-        print(f"\nNhóm {i+1}:")
-        group_has_triples = False
+    if not oie_results_by_group:
+        print("  Không có dữ liệu OIE để hiển thị.")
+        return
+
+    for i, group_indices in enumerate(groups):
+        group_text_preview_list = [sentences[idx] for idx in group_indices if idx < len(sentences)]
+        group_text_preview = " ".join(group_text_preview_list)[:100] + "..."
+        print(f"\\nNhóm {i+1} (Văn bản nhóm: \"{group_text_preview}\"):") # Corrected syntax error
         
-        for idx in group:
-            triples = sentence_triples[idx]
-            if triples:
-                group_has_triples = True
-                sentence_preview = sentences[idx][:50] + "..." if len(sentences[idx]) > 50 else sentences[idx]
-                print(f"  Câu {idx}: {sentence_preview}")
-                
-                # Hiển thị một số triples
-                for j, triple in enumerate(triples[:max_display]):
-                    print(f"    - {triple['subject']} | {triple['relation']} | {triple['object']}")
-                
-                if len(triples) > max_display:
-                    print(f"    - ... và {len(triples) - max_display} quan hệ khác")
+        current_group_oie_triples = oie_results_by_group[i] if i < len(oie_results_by_group) else []
         
-        if not group_has_triples:
-            print("  Không có quan hệ nào được trích xuất trong nhóm này")
+        if current_group_oie_triples:
+            print(f"  Tìm thấy {len(current_group_oie_triples)} triple(s) cho nhóm này:")
+            for triple_idx, triple_dict in enumerate(current_group_oie_triples[:max_display_triples_per_group]):
+                subj = triple_dict.get('subject', 'N/A')
+                rel = triple_dict.get('relation', 'N/A')
+                obj = triple_dict.get('object', 'N/A')
+                print(f"    - ({subj}, {rel}, {obj})")
+
+            if len(current_group_oie_triples) > max_display_triples_per_group:
+                print(f"    - ... và {len(current_group_oie_triples) - max_display_triples_per_group} triple(s) khác.")
+        else:
+            print("  Không có triples nào được trích xuất cho nhóm này hoặc có lỗi xảy ra.")
 
 def save_to_database(query, passage, sentences, vectors, chunks):
     """Lưu kết quả phân nhóm vào database"""
@@ -524,9 +489,9 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
         extract_oie: Có trích xuất OIE triples hay không
         
     Returns:
-        tuple: (sentences, vectors, groups, all_triples)
+        tuple: (sentences, vectors, groups, all_triples_raw)
     """
-    print(f"\n--- Đang xử lý {document_id} ---")
+    print(f"\\n--- Đang xử lý {document_id} ---")
     
     # Bước 1: Tách câu
     sentences = extract_and_simplify_sentences(document, simplify=True)
@@ -591,16 +556,33 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
             print(f" - ... và {len(group_sentences)-3} câu khác")
     
     # Bước 8: Trích xuất OIE triples
-    all_triples = []
-    sentence_triples = []
-    
+    all_triples_raw = [] 
+    oie_results_by_group = [] # List of lists of OIE dicts, one inner list per group
+
     if extract_oie:
-        all_triples, sentence_triples = process_oie_in_groups(sentences, groups)
-        print(f"\n[SUCCESS] Đã trích xuất {len(all_triples)} quan hệ")
+        print("\\nExtracting OIE for groups using extract_relations_from_paragraph...")
+        for i, group_indices in enumerate(groups):
+            group_sentences_list = [sentences[idx] for idx in group_indices if idx < len(sentences)]
+            group_text = " ".join(group_sentences_list)
+            
+            current_group_oie_triples_for_this_group = [] # Renamed to avoid confusion
+            if group_text.strip(): # Ensure text is not empty before calling OIE
+                try:
+                    # Ensure extract_relations_from_paragraph is available in this scope
+                    # It should be imported at the top of the file: from Tool.OIE import extract_relations_from_paragraph
+                    current_group_oie_triples_for_this_group = extract_relations_from_paragraph(group_text)
+                    all_triples_raw.extend(current_group_oie_triples_for_this_group)
+                except Exception as e:
+                    print(f"Lỗi trong quá trình trích xuất OIE cho nhóm {i+1}: {e}")
+                    # import traceback # Consider importing traceback at the top if this is used
+                    # traceback.print_exc()
+            oie_results_by_group.append(current_group_oie_triples_for_this_group) 
+        print(f"\\n[SUCCESS] Đã trích xuất {len(all_triples_raw)} quan hệ từ tất cả các nhóm.")
     
     # Bước 9: Hiển thị OIE triples theo nhóm
-    if extract_oie and all_triples:
-        display_oie_triples(groups, sentences, sentence_triples)
+    if extract_oie and all_triples_raw: # Check all_triples_raw
+        # Call the updated display_oie_triples
+        display_oie_triples(groups, sentences, oie_results_by_group)
     
     # Bước 10: Trực quan hóa ma trận
     if visualize:
@@ -608,24 +590,18 @@ def process_document(document, document_id, query="", visualize=True, save_to_db
                                   title=f"Ma trận similarity - {document_id}")
     
     # Bước 11: Xuất kết quả ra file
-    export_results_to_file(document, sentences, groups, sentence_triples, document_id)
+    # Call the updated export_results_to_file
+    export_results_to_file(document, sentences, groups, oie_results_by_group if extract_oie else None, document_id)
     
     # Bước 12: Lưu kết quả vào database nếu được yêu cầu
     if save_to_db:
         if extract_oie:
-            # Tạo cấu trúc OIE_Sentence_Groups
-            oie_sentence_groups = []
-            for group in groups:
-                group_triples = []
-                for idx in group:
-                    group_triples.append(sentence_triples[idx])
-                oie_sentence_groups.append(group_triples)
-                
-            save_to_database_with_oie(query, document, sentences, vectors, groups, all_triples, oie_sentence_groups)
+            # oie_results_by_group is already in the correct format for oie_sentence_groups
+            save_to_database_with_oie(query, document, sentences, vectors, groups, all_triples_raw, oie_results_by_group)
         else:
             save_to_database(query, document, sentences, vectors, groups)
     
-    return sentences, vectors, groups, all_triples
+    return sentences, vectors, groups, all_triples_raw # Return all_triples_raw
 
 def generate_output_filename(document_id=None, prefix="semantic", suffix=".txt"):
     """
@@ -652,211 +628,295 @@ def generate_output_filename(document_id=None, prefix="semantic", suffix=".txt")
     # Tạo tên file với định dạng nhất quán
     return f"{prefix}_{safe_id}_{timestamp}{suffix}"
 
-def export_results_to_file(document, sentences, groups, sentence_triples=None, document_id=None):
+def export_results_to_file(document: str, 
+                           sentences: List[str], 
+                           groups: List[List[int]], 
+                           oie_results_by_group: Optional[List[List[Dict[str, str]]]] = None, 
+                           document_id: Optional[str] = None):
     """
-    Xuất kết quả phân nhóm và OIE ra file văn bản
-    
-    Args:
-        document: Văn bản gốc
-        sentences: Danh sách các câu
-        groups: Các nhóm câu
-        sentence_triples: Danh sách triples theo từng câu (tùy chọn)
-        document_id: ID của tài liệu
+    Xuất kết quả phân nhóm và OIE (theo nhóm) ra file văn bản.
     """
     if document_id is None:
-        document_id = f"document_{int(time.time())}"
+        # Fallback if document_id is not provided
+        # Ensure hashlib is imported: import hashlib
+        # Ensure time is imported: import time
+        document_id = hashlib.md5(document[:1000].encode('utf-8')).hexdigest()[:8] 
         
-    filename = generate_output_filename(document_id, prefix="grouping")
+    filename = generate_output_filename(document_id, prefix="grouping_analysis")
     try:
         with open(filename, 'w', encoding='utf-8') as f:
-            f.write(f"KẾT QUẢ PHÂN NHÓM VÀ TRÍCH XUẤT QUAN HỆ (OIE)\n")
-            f.write(f"Tài liệu: {document_id}\n")
-            f.write(f"Thời gian: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write(f"=== KẾT QUẢ PHÂN NHÓM NGỮ NGHĨA ===\\n")
+            f.write(f"Tài liệu ID: {document_id}\\n")
+            f.write(f"Thời gian xuất: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n") # Ensure time is imported
             
-            f.write(f"Tổng số câu: {len(sentences)}\n")
-            f.write(f"Số nhóm: {len(groups)}\n\n")
+            f.write("\\n--- VĂN BẢN GỐC ---\\n")
+            f.write(document + "\\n")
             
-            # Đếm tổng số triples nếu có
-            if sentence_triples:
-                total_triples = sum(len(triples) for triples in sentence_triples)
-                f.write(f"Tổng số quan hệ trích xuất: {total_triples}\n\n")
+            f.write("\\n--- CÁC CÂU ĐÃ TÁCH ---\\n")
+            for i, sentence_text in enumerate(sentences): # Renamed sentence to sentence_text for clarity
+                f.write(f"{i+1}. {sentence_text}\\n")
             
-            for i, group in enumerate(groups):
-                f.write(f"=== NHÓM {i+1} ({len(group)} câu) ===\n")
-                
-                # Tính số triples trong nhóm nếu có
-                if sentence_triples:
-                    group_triples_count = sum(len(sentence_triples[idx]) for idx in group)
-                    f.write(f"Số quan hệ trong nhóm: {group_triples_count}\n\n")
-                
-                for idx in group:
-                    f.write(f"[{idx}] {sentences[idx]}\n")
-                    
-                    # Ghi các triples của câu nếu có
-                    if sentence_triples:
-                        triples = sentence_triples[idx]
-                        if triples:
-                            f.write(f"  Quan hệ trích xuất ({len(triples)}):\n")
-                            for triple in triples:
-                                f.write(f"  - {triple['subject']} | {triple['relation']} | {triple['object']}\n")
-                        else:
-                            f.write("  Không có quan hệ được trích xuất\n")
-                    f.write("\n")
-                
-                f.write("\n")
-        
-        print(f"\nĐã xuất kết quả chi tiết ra file: {filename}")
+            f.write("\\n--- CÁC NHÓM NGỮ NGHĨA ---\\n")
+            for i, group_indices in enumerate(groups):
+                f.write(f"\\nNhóm {i+1} (gồm {len(group_indices)} câu):\\n")
+                for idx in group_indices:
+                    if idx < len(sentences): # Check index bounds
+                        f.write(f"  - {sentences[idx]}\\n")
+            
+            # Ghi thông tin OIE nếu có
+            if oie_results_by_group:
+                f.write("\\n\\n=== OPEN INFORMATION EXTRACTION (OIE Results per Group) ===\\n")
+                for i, group_oie_triples in enumerate(oie_results_by_group):
+                    current_group_indices = groups[i] if i < len(groups) else []
+                    group_sentences_list = [sentences[idx] for idx in current_group_indices if idx < len(sentences)]
+                    group_text_preview = " ".join(group_sentences_list)[:70] + "...";
+                    f.write(f"\\n--- Nhóm {i+1} (Văn bản nhóm: \"{group_text_preview}\") ---\\n") # Corrected syntax error
+
+                    if group_oie_triples:
+                        f.write(f"  Tìm thấy {len(group_oie_triples)} triple(s):\\n")
+                        for triple_dict in group_oie_triples:
+                            # Ensure format_oie_triples_to_string is available and works with a single triple dict in a list
+                            formatted_triple_str = format_oie_triples_to_string([triple_dict]).strip()
+                            f.write(f"    - {formatted_triple_str}\\n")
+                    else:
+                        f.write("  (Không có triples cho nhóm này hoặc có lỗi xảy ra)\\n")
+                        
+        print(f"Đã xuất kết quả phân tích chi tiết ra file: {filename}")
     except Exception as e:
-        print(f"Lỗi khi xuất kết quả ra file: {e}")
+        print(f"Lỗi khi xuất file: {e}")
+        # import traceback # Consider importing traceback at the top
+        # traceback.print_exc()
+    # Ensure the try block has a corresponding except or finally, which it does now.
 
 # --- ADD THE NEW CHUNKING FUNCTION ---
 def semantic_chunk_passage_from_grouping_logic(
-    doc_id: str,
+    passage_id: str,
     passage_text: str,
-    model_name: str, # Model name is now crucial
+    model_name: str,
     initial_threshold: Union[str, float] = 'auto',
     decay_factor: float = 0.85,
     min_threshold: Union[str, float] = 'auto',
-    auto_percentiles: Tuple[int, int] = (85, 25),
-    embedding_batch_size: int = 16, # <-- ADDED BATCH SIZE PARAMETER
+    initial_percentile: int = 95,
+    min_percentile: int = 10,
+    embedding_batch_size: int = 16, # Added batch size for embedding
+    include_oie: bool = False, # Added include_oie flag
+    device: Optional[object] = None, # ADDED DEVICE PARAMETER
     **kwargs # Catch unused args like simplify if passed
-) -> List[Tuple[str, str]]:
+) -> List[Tuple[str, str, Optional[str]]]: # Return type includes optional OIE string
     """
-    Phân đoạn văn bản dựa trên nhóm ngữ nghĩa lan truyền, tối ưu hóa bộ nhớ.
-    Args:
-        # ... (các args khác giữ nguyên) ...
-        embedding_batch_size: Kích thước lô khi nhúng câu.
-    Returns:
-        List[Tuple[str, str]]: Danh sách các (chunk_id, chunk_text).
+    Phân đoạn văn bản dựa trên logic nhóm ngữ nghĩa, có tùy chọn OIE.
     """
-    chunks_result = []
-    sentences = None # Initialize for finally block
-    sim_matrix = None
-    groups = None
-
+    print(f"\nProcessing passage ID: {passage_id} with Semantic Grouping...")
+    print(f"  Initial Threshold: {initial_threshold}, Decay: {decay_factor}, Min Threshold: {min_threshold}")
+    if initial_threshold == 'auto': print(f"  Initial Percentile: {initial_percentile}")
+    if min_threshold == 'auto': print(f"  Min Percentile: {min_percentile}")
+    print(f"  Embedding Batch Size: {embedding_batch_size}")
+    print(f"  Include OIE: {include_oie}")
+    print(f"  Device: {device}") # ADDED FOR LOGGING
+    
+    # Bước 1: Trích xuất câu
+    sentences = extract_and_simplify_sentences(passage_text, simplify=False)
+    
+    if not sentences or len(sentences) < 2:
+        print("  Not enough sentences to perform grouping. Returning single chunk.")
+        oie_string_single_chunk = None
+        if include_oie and passage_text.strip():
+            try:
+                relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                if relations:
+                    oie_string_single_chunk = format_oie_triples_to_string(relations)
+            except Exception as e_oie_single:
+                print(f"  Error during OIE for single chunk: {e_oie_single}")
+        return [(f"{passage_id}_group_0", passage_text, oie_string_single_chunk)]
+    
+    # Bước 2: Tạo ma trận tương đồng ngữ nghĩa (sử dụng batch embedding)
+    sim_matrix = create_semantic_matrix(sentences, model_name=model_name, batch_size_embed=embedding_batch_size, device=device) # PASS DEVICE
+    if sim_matrix is None:
+        print("  Failed to create similarity matrix. Returning single chunk.")
+        oie_string_fail_matrix = None
+        if include_oie and passage_text.strip():
+            try:
+                relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                if relations:
+                    oie_string_fail_matrix = format_oie_triples_to_string(relations)
+            except Exception as e_oie_fail_matrix:
+                print(f"  Error during OIE for single chunk (matrix fail): {e_oie_fail_matrix}")
+        return [(f"{passage_id}_group_0", passage_text, oie_string_fail_matrix)]
+    
+    # Bước 3: Xác định ngưỡng tự động nếu cần
+    current_initial_threshold = initial_threshold
+    current_min_threshold = min_threshold
+    
+    if initial_threshold == 'auto' or min_threshold == 'auto':
+        upper_triangle_indices = np.triu_indices_from(sim_matrix, k=1)
+        similarities = sim_matrix[upper_triangle_indices]
+        
+        if len(similarities) == 0:
+            print("  Not enough similarity values for auto threshold. Returning single chunk.")
+            oie_string_auto_thresh_fail = None
+            if include_oie and passage_text.strip():
+                try:
+                    relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                    if relations:
+                        oie_string_auto_thresh_fail = format_oie_triples_to_string(relations)
+                except Exception as e_oie_auto_thresh_fail:
+                    print(f"  Error during OIE for single chunk (auto thresh fail): {e_oie_auto_thresh_fail}")
+            return [(f"{passage_id}_group_0", passage_text, oie_string_auto_thresh_fail)]
+        
+        if initial_threshold == 'auto':
+            current_initial_threshold = np.percentile(similarities, initial_percentile)
+            print(f"  Auto Initial Threshold ({initial_percentile}th percentile): {current_initial_threshold:.4f}")
+        if min_threshold == 'auto':
+            current_min_threshold = np.percentile(similarities, min_percentile)
+            print(f"  Auto Min Threshold ({min_percentile}th percentile): {current_min_threshold:.4f}")
+    
     try:
-        # a. Tách câu (không simplify để giữ nguyên nội dung)
-        sentences = nltk.sent_tokenize(passage_text)
-        # sentences = extract_and_simplify_sentences(passage_text, simplify=False) # Use NLTK directly if simpler
-        if not sentences: return []
-        if len(sentences) == 1: # Xử lý passage chỉ có 1 câu
-            chunk_text = sentences[0]
-            # Sử dụng hash an toàn hơn và có thể ngắn hơn
-            chunk_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
-            chunk_id = f"{doc_id}_chunk0_hash{chunk_hash}"
-            # Giải phóng bộ nhớ câu
-            del sentences
-            gc.collect()
-            return [(chunk_id, chunk_text)]
+        final_initial_threshold = float(current_initial_threshold)
+        final_min_threshold = float(current_min_threshold)
+    except ValueError:
+        print("  Error converting auto thresholds to float. Returning single chunk.")
+        oie_string_float_conv_fail = None
+        if include_oie and passage_text.strip():
+            try:
+                relations = extract_relations_from_paragraph(passage_text, use_enhanced_settings=True)
+                if relations:
+                    oie_string_float_conv_fail = format_oie_triples_to_string(relations)
+            except Exception as e_oie_float_conv_fail:
+                print(f"  Error during OIE for single chunk (float conv fail): {e_oie_float_conv_fail}")
+        return [(f"{passage_id}_group_0", passage_text, oie_string_float_conv_fail)]
+    
+    # Bước 4: Nhóm câu
+    groups = []
+    current_group = [0]
+    threshold = final_initial_threshold
+    
+    for i in range(len(sentences) - 1):
+        similarity = sim_matrix[i, i+1]
+        if similarity >= threshold:
+            current_group.append(i+1)
+        else:
+            groups.append(current_group)
+            current_group = [i+1]
+            threshold = max(final_min_threshold, threshold * decay_factor)
+    groups.append(current_group)
+    
+    # Bước 5: Tạo chunks từ các nhóm và tùy chọn thêm OIE
+    final_chunks = []
+    for i, group_indices in enumerate(groups):
+        chunk_sentences = [sentences[idx] for idx in group_indices]
+        chunk_text = " ".join(chunk_sentences)
+        
+        oie_string_for_chunk = None
+        if include_oie and chunk_text.strip():
+            try:
+                relations = extract_relations_from_paragraph(chunk_text, use_enhanced_settings=True)
+                if relations:
+                    oie_string_for_chunk = format_oie_triples_to_string(relations)
+            except Exception as e_oie_group:
+                print(f"  Error during OIE extraction for group {i}: {e_oie_group}")
+        
+        chunk_id = f"{passage_id}_group_{i}"
+        final_chunks.append((chunk_id, chunk_text, oie_string_for_chunk))
+    
+    del sentences
+    del sim_matrix
+    if 'similarities' in locals(): del similarities
+    del groups
+    gc.collect()
+    
+    print(f"  Passage {passage_id} chunked into {len(final_chunks)} groups.")
+    return final_chunks
 
-        # b. Tạo ma trận tương đồng (SỬ DỤNG BATCH EMBEDDING)
-        sim_matrix = create_semantic_matrix(sentences, model_name=model_name, batch_size_embed=embedding_batch_size)
+# --- Helper function to format OIE triples (needed locally) ---
+def format_oie_triples_to_string(triples_list: List[Dict[str, str]]) -> str:
+    if not triples_list:
+        return ""
+    formatted_triples = []
+    for triple in triples_list:
+        s = str(triple.get('subject', '')).replace('\\t', ' ').replace('\\n', ' ').strip()
+        r = str(triple.get('relation', '')).replace('\\t', ' ').replace('\\n', ' ').strip()
+        o = str(triple.get('object', '')).replace('\\t', ' ').replace('\\n', ' ').strip()
+        if s and r and o: # Only include complete triples
+            formatted_triples.append(f"({s}; {r}; {o})")
+    if not formatted_triples:
+        return ""
+    return " [OIE_TRIPLES] " + " | ".join(formatted_triples) + " [/OIE_TRIPLES]"
 
-        if sim_matrix is None:
-            print(f"  Skipping doc {doc_id} due to similarity matrix creation error.")
-            # Giải phóng bộ nhớ câu
-            del sentences
-            gc.collect()
-            return []
+# --- Main function for testing (if needed) ---
+if __name__ == '__main__':
+    # Ví dụ kiểm thử
+    sample_passage = "The quick brown fox jumps over the lazy dog. The dog barks loudly. A cat watches from a distance."
+    passage_id = "sample_001"
+    model_name_test = "sentence-transformers/all-MiniLM-L6-v2" # Thay bằng model bạn dùng
 
-        # c. Phân tích phân bố và xác định ngưỡng
-        stats = analyze_similarity_distribution(sim_matrix)
-        # ... (logic xác định initial_thresh, min_thresh từ stats hoặc giá trị cố định như cũ) ...
-        current_initial_threshold = initial_threshold
-        current_min_threshold = min_threshold
+    print("Testing Semantic Grouping without OIE...")
+    chunks_no_oie = semantic_chunk_passage_from_grouping_logic(
+        passage_id, sample_passage, model_name_test,
+        initial_threshold=0.6, decay_factor=0.9, min_threshold=0.3,
+        embedding_batch_size=2, include_oie=False
+    )
+    for cid, text, oie_str in chunks_no_oie:
+        print(f"  Chunk ID: {cid}")
+        print(f"  Text: {text}")
+        assert oie_str is None, "OIE string should be None when include_oie=False"
+    print("Test without OIE completed.")
 
-        if initial_threshold == 'auto' or min_threshold == 'auto':
-            if not stats:
-                 current_initial_threshold = 0.8 # Default fallback
-                 current_min_threshold = 0.2   # Default fallback
-                 print("  WARNING: Could not analyze distribution, using default thresholds (0.8, 0.2)")
-            else:
-                try:
-                    initial_p, min_p = auto_percentiles
-                    initial_key, min_key = f'p{initial_p}', f'p{min_p}'
-
-                    if initial_threshold == 'auto':
-                        current_initial_threshold = stats.get(initial_key, 0.8)
-                    elif isinstance(initial_threshold, str): current_initial_threshold = float(initial_threshold)
-
-                    if min_threshold == 'auto':
-                        current_min_threshold = stats.get(min_key, 0.2)
-                    elif isinstance(min_threshold, str): current_min_threshold = float(min_threshold)
-
-                    # Đảm bảo min < initial, điều chỉnh nếu cần
-                    if current_min_threshold >= current_initial_threshold:
-                        print(f"  WARNING: Auto min threshold ({current_min_threshold:.4f}) >= initial ({current_initial_threshold:.4f}). Adjusting min.")
-                        lower_min_key = f'p{max(10, min_p - 15)}' # Thử percentile thấp hơn
-                        adjusted_min = stats.get(lower_min_key, current_initial_threshold * 0.5)
-                        current_min_threshold = max(0.1, adjusted_min) # Đảm bảo không quá thấp
-                        print(f"  Adjusted min threshold: {current_min_threshold:.4f}")
-
-                except Exception as auto_err:
-                    print(f"  ERROR determining auto thresholds: {auto_err}. Using defaults (0.8, 0.2).")
-                    current_initial_threshold = 0.8 if initial_threshold == 'auto' else float(initial_threshold)
-                    current_min_threshold = 0.2 if min_threshold == 'auto' else float(min_threshold)
-
-        # Đảm bảo ngưỡng là float nếu ban đầu là string
-        if isinstance(current_initial_threshold, str): current_initial_threshold = float(current_initial_threshold)
-        if isinstance(current_min_threshold, str): current_min_threshold = float(current_min_threshold)
-
-        # Kiểm tra cuối cùng min < initial
-        if current_min_threshold >= current_initial_threshold:
-             print(f"  WARNING: Final check failed: min ({current_min_threshold:.4f}) >= initial ({current_initial_threshold:.4f}). Setting min = initial * 0.5")
-             current_min_threshold = max(0.1, current_initial_threshold * 0.5)
-
-        # d. Thực hiện phân nhóm
-        print(f"  Grouping with thresholds: initial={current_initial_threshold:.4f}, min={current_min_threshold:.4f}")
-        groups = semantic_spreading_grouping(
-            sim_matrix,
-            current_initial_threshold,
-            decay_factor,
-            current_min_threshold
+    print("\nTesting Semantic Grouping with OIE...")
+    # Giả lập rằng Tool.OIE.extract_relations_from_paragraph đã được import và hoạt động
+    # Bạn cần đảm bảo CORENLP_HOME được thiết lập đúng cách cho OIE hoạt động
+    try:
+        chunks_with_oie = semantic_chunk_passage_from_grouping_logic(
+            passage_id, sample_passage, model_name_test,
+            initial_threshold=0.6, decay_factor=0.9, min_threshold=0.3,
+            embedding_batch_size=2, include_oie=True
         )
-        print(f"  Grouped into {len(groups)} chunks.")
-
-        # Giải phóng ma trận tương đồng sau khi phân nhóm xong
-        del sim_matrix
-        sim_matrix = None # Explicitly set to None
-        gc.collect()
-
-        # e. Tạo chunks từ groups
-        for i, group_indices in enumerate(groups):
-            if not group_indices: continue
-            # Sắp xếp chỉ số để đảm bảo thứ tự câu trong chunk
-            sorted_indices = sorted(group_indices)
-            chunk_sentences = [sentences[idx] for idx in sorted_indices]
-            chunk_text = " ".join(chunk_sentences).strip()
-            if chunk_text:
-                # Tạo hash an toàn hơn
-                try:
-                    text_hash = hashlib.sha1(chunk_text.encode('utf-8', errors='ignore')).hexdigest()[:8]
-                except Exception:
-                    text_hash = "nohash" # Fallback
-                chunk_id = f"{doc_id}_chunk{i}_hash{text_hash}"
-                chunks_result.append((chunk_id, chunk_text))
-            # Giải phóng bộ nhớ trung gian
-            del chunk_sentences
-            del chunk_text
-            del sorted_indices
-
-        # Giải phóng bộ nhớ câu và nhóm
-        del sentences
-        sentences = None
-        del groups
-        groups = None
-        gc.collect() # Gọi GC lần cuối trước khi trả về
-
-        return chunks_result
-
+        for cid, text, oie_str in chunks_with_oie:
+            print(f"  Chunk ID: {cid}")
+            print(f"  Text: {text}")
+            print(f"  OIE: {oie_str}")
+            if oie_str is not None:
+                assert "[OIE_TRIPLES]" in oie_str, "OIE string format error"
+        print("Test with OIE completed.")
     except Exception as e:
-        print(f"\nError processing document {doc_id} in semantic_chunk_passage_from_grouping_logic: {e}")
-        import traceback
-        traceback.print_exc()
-        # Cố gắng giải phóng bộ nhớ nếu có lỗi
-        if sentences is not None: del sentences
-        if sim_matrix is not None: del sim_matrix
-        if groups is not None: del groups
-        gc.collect()
-        return []
+        print(f"Error during OIE test: {e}. Ensure Stanford CoreNLP is set up correctly.")
+
+    # Test với ngưỡng tự động
+    print("\nTesting Semantic Grouping with AUTO thresholds and OIE...")
+    try:
+        chunks_auto_oie = semantic_chunk_passage_from_grouping_logic(
+            passage_id, sample_passage, model_name_test,
+            initial_threshold='auto', decay_factor=0.8, min_threshold='auto',
+            initial_percentile=90, min_percentile=20,
+            embedding_batch_size=2, include_oie=True
+        )
+        for cid, text, oie_str in chunks_auto_oie:
+            print(f"  Chunk ID: {cid}")
+            print(f"  Text: {text}")
+            print(f"  OIE: {oie_str}")
+        print("Test with AUTO thresholds and OIE completed.")
+    except Exception as e:
+        print(f"Error during AUTO OIE test: {e}. Ensure Stanford CoreNLP is set up correctly.")
+
+    # Test với một câu duy nhất
+    single_sentence_passage = "This is a single sentence."
+    print("\nTesting with a single sentence...")
+    chunks_single = semantic_chunk_passage_from_grouping_logic(
+        "single_001", single_sentence_passage, model_name_test, include_oie=True
+    )
+    assert len(chunks_single) == 1, "Single sentence should result in one chunk"
+    print(f"  Chunk Text: {chunks_single[0][1]}")
+    print(f"  OIE: {chunks_single[0][2]}")
+    print("Test with single sentence completed.")
+
+    # Test với không có câu nào
+    empty_passage = "    "
+    print("\nTesting with an empty passage...")
+    chunks_empty = semantic_chunk_passage_from_grouping_logic(
+        "empty_001", empty_passage, model_name_test, include_oie=True
+    )
+    assert len(chunks_empty) == 1, "Empty passage should result in one chunk"
+    assert chunks_empty[0][1].strip() == "", "Chunk text for empty passage should be empty"
+    print("Test with empty passage completed.")
+
+    print("\nAll tests completed.")
 

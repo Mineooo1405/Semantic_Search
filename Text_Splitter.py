@@ -8,7 +8,7 @@ from typing import List, Dict, Union, Optional, Callable, Tuple # Sửa lại ty
 from dotenv import load_dotenv
 from Tool.Sentence_Detector import extract_and_simplify_sentences
 from Tool.Database import connect_to_db
-# from Tool.OIE import extract_triples_for_search
+from Tool.OIE import extract_relations_from_paragraph # MODIFIED OIE import
 import hashlib
 import traceback # Thêm import này
 
@@ -120,39 +120,59 @@ def chunk_passage_text_splitter(
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
     include_oie: bool = False,
+    device: Optional[object] = None, # Added device, though not used by this splitter
     **kwargs 
-) -> List[List[Tuple[str, str, Optional[str]]]]: # <<< SỬA ĐỔI TYPE HINT
+) -> List[Tuple[str, str, Optional[str]]]: # MODIFIED: Return type to match others
     """
     Chunk một passage sử dụng logic Text Splitter (split_by_sentence).
-    Trả về một list chứa một list các chunk tuples.
+    Trả về một list các chunk tuples (chunk_id, chunk_text, oie_string_or_None).
+    Device parameter is accepted for consistency but not used as this splitter is rule-based.
     """
     actual_chunks_result: List[Tuple[str, str, Optional[str]]] = []
+    # Log that device is not used if provided, for clarity
+    if device is not None:
+        print(f"  TextSplitter: Device parameter provided but not used by this rule-based splitter for doc_id {doc_id}.")
+    print(f"  TextSplitter: Processing doc_id {doc_id}...")
+    print(f"  TextSplitter: Chunk size: {chunk_size}, Chunk overlap: {chunk_overlap}")
+    print(f"  TextSplitter: Include OIE: {include_oie}")
+
     try:
         chunk_texts, _, _ = split_by_sentence(passage_text, chunk_size, chunk_overlap)
 
         for chunk_idx, chunk_text_content in enumerate(chunk_texts):
-            if chunk_text_content:
-                chunk_hash = hashlib.md5(chunk_text_content.encode('utf-8')).hexdigest()[:10]
-                chunk_id = f"{doc_id}_{chunk_hash}_{chunk_idx}"
-                
-                oie_triples_str = None
-                if include_oie:
-                    # Nếu bạn có logic OIE cho TextSplitter, hãy thêm vào đây.
-                    # Ví dụ:
-                    # from Tool.OIE import extract_triples # Đảm bảo import đúng
-                    # oie_triples_str = extract_triples(chunk_text_content, doc_id, chunk_id) 
-                    pass 
-
-                actual_chunks_result.append((chunk_id, chunk_text_content, oie_triples_str))
+            chunk_id = f"{doc_id}_textsplit_{chunk_idx}"
+            oie_string = None
+            if include_oie and chunk_text_content.strip():
+                try:
+                    relations = extract_relations_from_paragraph(chunk_text_content, use_enhanced_settings=True)
+                    if relations:
+                        # Need format_oie_triples_to_string here or import it
+                        oie_string = format_oie_triples_to_string_for_text_splitter(relations) # Call local version
+                except Exception as e_oie:
+                    print(f"Error during OIE for text_splitter chunk {chunk_id}: {e_oie}")
+            
+            actual_chunks_result.append((chunk_id, chunk_text_content, oie_string))
 
     except Exception as e:
-        # print(f"Error chunking doc {doc_id} with Text Splitter: {e}") # Log này có thể đã có ở tầng cao hơn
+        print(f"Error chunking doc {doc_id} with Text Splitter: {e}")
         # traceback.print_exc()
-        # Trả về một cấu trúc rỗng nhưng vẫn đúng định dạng để không làm hỏng quá trình unpack
-        return [[]] # Trả về list chứa một list rỗng
+        # Return empty list in case of error, but matching the expected type
+        return [] 
 
-    # Luôn trả về một list chứa list các chunk (actual_chunks_result)
-    # Nếu actual_chunks_result rỗng, nó sẽ là [[]]
-    # Nếu actual_chunks_result có chunk, nó sẽ là [[(chunk1_data), (chunk2_data)]]
-    return [actual_chunks_result] # <<< SỬA ĐỔI QUAN TRỌNG
+    return actual_chunks_result # MODIFIED: Return List directly
+
+# ADD HELPER FOR OIE STRING FORMATTING (specific to this file to avoid import issues)
+def format_oie_triples_to_string_for_text_splitter(triples_list: List[Dict[str, str]]) -> str:
+    if not triples_list:
+        return ""
+    formatted_triples = []
+    for triple in triples_list:
+        s = str(triple.get('subject', '')).replace('\\t', ' ').replace('\\n', ' ').strip()
+        r = str(triple.get('relation', '')).replace('\\t', ' ').replace('\\n', ' ').strip()
+        o = str(triple.get('object', '')).replace('\\t', ' ').replace('\\n', ' ').strip()
+        if s and r and o:
+            formatted_triples.append(f"({s}; {r}; {o})")
+    if not formatted_triples:
+        return ""
+    return " [OIE_TRIPLES] " + " | ".join(formatted_triples) + " [/OIE_TRIPLES]"
 
