@@ -8,14 +8,22 @@ from pathlib import Path
 import json # Added
 import sys # Added
 import shutil # Added for rmtree
+import argparse # Added for command-line arguments
+
+# --- Argument Parsing --- Added
+parser = argparse.ArgumentParser(description="KNRM Training Script")
+parser.add_argument("--train_file", type=str, required=True, help="Path to the training data file.")
+parser.add_argument("--dev_file", type=str, required=True, help="Path to the development/validation data file.")
+parser.add_argument("--test_file", type=str, required=True, help="Path to the test data file.")
+args = parser.parse_args()
 
 # --- Script Configuration ---
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv" 
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" 
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" # Placeholder, will be replaced by master script
+TRAIN_FILE_PATH = args.train_file 
+DEV_FILE_PATH = args.dev_file 
+TEST_FILE_PATH = args.test_file # Placeholder, will be replaced by master script
 
-EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt"
-EMBEDDING_DIMENSION = 100 # Should match the GloVe file used
+EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt"
+EMBEDDING_DIMENSION = 300 # Should match the GloVe file used
 
 MODEL_NAME = "KNRM" # For constructing output directory
 OUTPUT_DIR = Path(f"D:/SemanticSearch/trained_{MODEL_NAME.lower()}_model")
@@ -25,7 +33,7 @@ PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "preprocessor.dill" # Standardized name
 CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json"
 
 # KNRM specific parameters (can be adjusted)
-BATCH_SIZE = 20 # From ConvKNRM example
+BATCH_SIZE = 128 # From ConvKNRM example # MODIFIED from 20 to 128 (aligning with KNRM notebook)
 EPOCHS = 10     # From ConvKNRM example
 KERNEL_NUM = 21 # Default KNRM
 SIGMA = 0.1     # Default KNRM
@@ -122,7 +130,13 @@ print(f"Test DataPack created with {len(test_pack_raw)} entries (may be using de
 
 # --- Preprocessing ---
 print("Preprocessing data for KNRM...")
-preprocessor = mz.models.KNRM.get_default_preprocessor() # Using KNRM's default preprocessor
+# Using KNRM's default preprocessor
+preprocessor = mz.preprocessors.BasicPreprocessor(
+    truncated_mode='post',  # Added to align with notebook
+    truncated_length_left=10,
+    truncated_length_right=100, # MODIFIED from 40 to 100 (aligning with KNRM notebook)
+    filter_low_freq=2
+)
 train_pack_processed = preprocessor.fit_transform(train_pack_raw)
 dev_pack_processed = preprocessor.transform(dev_pack_raw)
 test_pack_processed = preprocessor.transform(test_pack_raw)
@@ -154,7 +168,7 @@ print("Creating Datasets and DataLoaders...")
 trainset = mz.dataloader.Dataset(
     data_pack=train_pack_processed,
     mode='pair',
-    num_dup=5,      # Common value, can be tuned
+    num_dup=5,      # Common value, can be tuned # MODIFIED from 20 to 5 (aligning with KNRM notebook)
     num_neg=1,      # For RankHingeLoss or similar
     batch_size=BATCH_SIZE,
     resample=True,
@@ -184,12 +198,12 @@ print("Datasets and DataLoaders created.")
 # --- Model Setup ---
 print("Setting up KNRM model...")
 model = mz.models.KNRM()
-
 model.params['task'] = ranking_task
 model.params['embedding'] = embedding_matrix
-model.params['kernel_num'] = KERNEL_NUM
-model.params['sigma'] = SIGMA
-model.params['exact_sigma'] = EXACT_SIGMA
+model.params['embedding_freeze'] = False # Ensure embeddings are trainable
+model.params['kernel_num'] = 21
+model.params['sigma'] = 0.1
+model.params['exact_sigma'] = 0.001
 
 model.build()
 print(model)
@@ -197,8 +211,21 @@ print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requir
 
 # --- Trainer Setup ---
 print("Setting up Trainer...")
-optimizer = torch.optim.Adadelta(model.parameters()) 
+optimizer = torch.optim.Adadelta(model.parameters()) # Changed from Adam to Adadelta to match notebook
 # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3) # Optional: add if needed
+
+# Determine the dataset name part from the path
+dataset_name_part = os.path.basename(args.train_file)
+
+# Define the base directory for this model type
+model_save_dir_base = "trained_knrm_model"
+
+# Construct the full save directory path
+full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
+
+# Ensure the directory exists
+os.makedirs(full_save_dir, exist_ok=True)
+print(f"[KNRM Script] Model will be saved in: {full_save_dir}")
 
 trainer = mz.trainers.Trainer(
     model=model,
@@ -206,9 +233,11 @@ trainer = mz.trainers.Trainer(
     trainloader=trainloader,
     validloader=validloader,
     validate_interval=None, 
-    epochs=EPOCHS,
-    # scheduler=scheduler, # Optional
-    # clip_norm=10 # Optional: add if needed
+    epochs=EPOCHS, 
+    save_dir=full_save_dir, # MODIFIED
+    clip_norm=10, 
+    patience=EPOCHS, # MODIFIED from EPOCHS
+    key=ranking_task.metrics[0]# MODIFIED from ranking_task.metrics[0]
 )
 print("Trainer setup complete.")
 

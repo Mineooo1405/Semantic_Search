@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import json # ADDED for saving config
 from datetime import datetime # ADDED for saving config
+import argparse # Added for command-line arguments
 
 print(f"MatchZoo version: {mz.__version__}")
 print(f"PyTorch version: {torch.__version__}")
@@ -25,12 +26,19 @@ def safe_get_param_value(params_table, key, default_val):
     return default_val
 # +++ END ADDED HELPER FUNCTION +++
 
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
+# --- Argument Parsing --- Added
+parser = argparse.ArgumentParser(description="MatchPyramid Training Script")
+parser.add_argument("--train_file", type=str, required=True, help="Path to the training data file.")
+parser.add_argument("--dev_file", type=str, required=True, help="Path to the development/validation data file.")
+parser.add_argument("--test_file", type=str, required=True, help="Path to the test data file.")
+args = parser.parse_args()
 
-EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt"
-EMBEDDING_DIMENSION = 100
+TRAIN_FILE_PATH = args.train_file
+DEV_FILE_PATH = args.dev_file
+TEST_FILE_PATH = args.test_file
+
+EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt" # NOTE: This path points to 100D. Update if using 300D.
+EMBEDDING_DIMENSION = 300 # Changed from 100 to 300 to match notebook
 
 OUTPUT_DIR = Path("D:/SemanticSearch/trained_matchpyramid_model")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -38,8 +46,8 @@ MODEL_SAVE_PATH = OUTPUT_DIR / "matchpyramid_model.pt"
 PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "preprocessor.dill" # CHANGED: Correct filename
 CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json" # ADDED for config
 
-BATCH_SIZE = 128
-EPOCHS = 10
+BATCH_SIZE = 20 # Changed from 128 to 20 to match notebook dataset config
+EPOCHS = 5 # Changed from 10 to 5 to match notebook
 
 try:
     nltk.data.find('tokenizers/punkt')
@@ -159,7 +167,7 @@ print("Creating Datasets and DataLoaders...")
 trainset = mz.dataloader.Dataset(
     data_pack=train_pack_processed,
     mode='pair',
-    num_dup=1,
+    num_dup=2, # Changed from 1 to 2 to match notebook
     num_neg=1,
     batch_size=BATCH_SIZE,
     resample=True,
@@ -193,8 +201,9 @@ model = mz.models.MatchPyramid()
 
 model.params['task'] = ranking_task
 model.params['embedding'] = embedding_matrix
+model.params['embedding_freeze'] = False # Ensure embeddings are trainable
 model.params['kernel_size'] = [[3, 3], [3, 3]]
-model.params['kernel_count'] = [8, 16] 
+model.params['kernel_count'] = [16, 32]  # Changed from [8, 16] to match notebook
 model.params['dpool_size'] = [3, 10]
 model.params['dropout_rate'] = 0.1
 
@@ -203,16 +212,38 @@ print(model)
 print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
 print("Setting up Trainer...")
-optimizer = torch.optim.Adam(model.parameters())
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001) # Added learning rate
+
+# --- Argument Parsing --- Added
+parser = argparse.ArgumentParser(description="MatchPyramid Training Script")
+parser.add_argument("--train_file", type=str, required=True, help="Path to the training data file.")
+parser.add_argument("--dev_file", type=str, required=True, help="Path to the development/validation data file.")
+parser.add_argument("--test_file", type=str, required=True, help="Path to the test data file.")
+args = parser.parse_args()
+
+# Determine the dataset name part from the path
+dataset_name_part = os.path.basename(args.train_file)
+
+# Define the base directory for this model type
+model_save_dir_base = "trained_matchpyramid_model"
+
+# Construct the full save directory path
+full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
+
+# Ensure the directory exists
+os.makedirs(full_save_dir, exist_ok=True)
+print(f"[MatchPyramid Script] Model will be saved in: {full_save_dir}")
 
 trainer = mz.trainers.Trainer(
     model=model,
     optimizer=optimizer,
     trainloader=trainloader,
     validloader=validloader,
-    validate_interval=None, 
+    validate_interval=None,
     epochs=EPOCHS,
-    patience=EPOCHS
+    save_dir=full_save_dir,  # MODIFIED
+    patience=EPOCHS, # As per notebook (assuming 3 if not specified, or adjust as needed)
+    key=ranking_task.metrics[0]
 )
 print("Trainer setup complete.")
 

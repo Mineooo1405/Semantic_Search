@@ -8,6 +8,7 @@ from pathlib import Path
 # from transform_data import transform_to_matchzoo_format
 import json # ADDED for saving config
 import dill # ADDED for saving preprocessor explicitly
+import argparse # Added for command-line arguments
 
 # --- Helper function to safely get parameter values ---
 def safe_get_param_value(params_table, key, default_val):
@@ -65,11 +66,31 @@ def load_triplet_data_from_tsv(file_path):
         print(f"ERROR: Could not read file {file_path}: {e}")
         return []
 
-# --- Load CUSTOM Dataset ---
+# --- Argument Parsing ---
+parser = argparse.ArgumentParser(description="MatchLSTM Training Script")
+parser.add_argument("--train_file", type=str, required=True, help="Path to the training data file.")
+parser.add_argument("--dev_file", type=str, required=True, help="Path to the development/validation data file.")
+parser.add_argument("--test_file", type=str, required=True, help="Path to the test data file.")
+args = parser.parse_args()
+
+# Determine the dataset name part from the path
+dataset_name_part = os.path.basename(args.train_file)
+
+# Define the base directory for this model type
+model_save_dir_base = "trained_matchlstm_model"
+
+# Construct the full save directory path
+full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
+
+# Ensure the directory exists
+os.makedirs(full_save_dir, exist_ok=True)
+print(f"[MatchLSTM Script] Model will be saved in: {full_save_dir}")
+
+# --- Load CUSTOM Dataset --- 
 print("Loading CUSTOM dataset.")
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" # Using dev for test
+TRAIN_FILE_PATH = args.train_file
+DEV_FILE_PATH = args.dev_file
+TEST_FILE_PATH = args.test_file # Using dev for test
 
 source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
 source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
@@ -124,8 +145,8 @@ print("Data preprocessed.")
 
 # --- Embedding Setup ---
 print("Setting up YOUR CUSTOM embeddings...")
-YOUR_EMBEDDING_FILE_PATH = r"D:\SemanticSearch\embedding\glove.6B\glove.6B.100d.txt"
-YOUR_EMBEDDING_DIMENSION = 100
+YOUR_EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt" # NOTE: This path points to 100D. Update if using 300D.
+YOUR_EMBEDDING_DIMENSION = 300 # Changed from 100 to 300 to match notebook
 
 custom_embedding = None
 if not os.path.exists(YOUR_EMBEDDING_FILE_PATH):
@@ -227,7 +248,7 @@ print(f'Trainable parameters: {trainable_params}')
 
 # --- Trainer Setup ---
 print("Setting up Trainer...")
-optimizer = torch.optim.Adadelta(model.parameters())
+optimizer = torch.optim.Adadelta(model.parameters()) # CHANGED from Adam to Adadelta to match notebook
 NUM_TRAIN_EPOCHS = 10 # ADDED: Define configured epochs
 trainer = mz.trainers.Trainer(
     model=model,
@@ -236,7 +257,8 @@ trainer = mz.trainers.Trainer(
     validloader=validloader,
     validate_interval=None,
     epochs=NUM_TRAIN_EPOCHS, # CHANGED: Use the variable
-    patience=NUM_TRAIN_EPOCHS # Added patience
+    patience=NUM_TRAIN_EPOCHS, # Use a reasonable patience for early stopping
+    key=ranking_task.metrics[0] # Monitor the first metric for early stopping
 )
 print("Trainer configured.")
 

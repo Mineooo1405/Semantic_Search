@@ -7,6 +7,11 @@ import os
 from pathlib import Path
 import json # ADDED for saving config
 from datetime import datetime # ADDED for saving config
+import argparse # Added for command-line arguments
+import tensorflow as tf
+import torch.optim as optim
+from matchzoo.engine.param import Param
+from matchzoo.engine.param_table import ParamTable
 
 
 print(f"MatchZoo version: {mz.__version__}")
@@ -14,13 +19,20 @@ print(f"PyTorch version: {torch.__version__}")
 print(f"NumPy version: {np.__version__}")
 print(f"Pandas version: {pd.__version__}")
 
-# --- Script Configuration ---
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
+# --- Argument Parsing ---
+parser = argparse.ArgumentParser(description="ArcI Training Script")
+parser.add_argument("--train_file", type=str, required=True, help="Path to the training data file.")
+parser.add_argument("--dev_file", type=str, required=True, help="Path to the development/validation data file.")
+parser.add_argument("--test_file", type=str, required=True, help="Path to the test data file.")
+args = parser.parse_args()
 
-EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt"
-EMBEDDING_DIMENSION = 100 
+# --- Script Configuration ---
+TRAIN_FILE_PATH = args.train_file 
+DEV_FILE_PATH = args.dev_file 
+TEST_FILE_PATH = args.test_file 
+
+EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt" # Note: This path likely points to 100D embeddings. You may need to update it for 300D.
+EMBEDDING_DIMENSION = 300 # Changed from 100 to 300 to match notebook
 
 OUTPUT_DIR = Path("D:/SemanticSearch/trained_arci_model")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -213,15 +225,28 @@ model.params['mlp_num_layers'] = 1
 model.params['mlp_num_units'] = 100
 model.params['mlp_num_fan_out'] = 1
 model.params['mlp_activation_func'] = 'relu'
-model.params['dropout_rate'] = 0.9 
-
+model.params['dropout_rate'] = 0.3 
+model.guess_and_fill_missing_params()
 model.build()
 print(model)
-print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f'Trainable params: {trainable_params}')
 
-print("Setting up Trainer...")
+# optimizer = optim.Adadelta(model.parameters()) # Changed from Adam to Adadelta, removed lr
+optimizer = optim.Adam(model.parameters(), lr=0.0001) # Using Adam as it showed improvement
 
-optimizer = torch.optim.Adadelta(model.parameters())
+# Determine the dataset name part from the path
+dataset_name_part = os.path.basename(TRAIN_FILE_PATH)
+
+# Define the base directory for this model type
+model_save_dir_base = "trained_arci_model"
+
+# Construct the full save directory path
+full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
+
+# Ensure the directory exists
+os.makedirs(full_save_dir, exist_ok=True)
+print(f"[ArcI Script] Model will be saved in: {full_save_dir}")
 
 trainer = mz.trainers.Trainer(
     model=model,
@@ -229,7 +254,9 @@ trainer = mz.trainers.Trainer(
     trainloader=trainloader,
     validloader=validloader,
     validate_interval=None, 
-    epochs=EPOCHS
+    epochs=EPOCHS,
+    patience=EPOCHS,  # Changed from EPOCHS to 3
+    key=ranking_task.metrics[0]  # Changed from ranking_task.metrics
 )
 print("Trainer setup complete.")
 

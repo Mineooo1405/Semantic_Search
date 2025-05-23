@@ -8,6 +8,7 @@ from pathlib import Path
 import json # Added for saving config
 import sys # Added
 import shutil # Added for rmtree
+import argparse # Added for command-line arguments
 
 # from transform_data import transform_to_matchzoo_format # Removed unused import
 
@@ -16,13 +17,20 @@ print(f"PyTorch version: {torch.__version__}")
 print(f"NumPy version: {np.__version__}")
 print(f"Pandas version: {pd.__version__}")
 
-# --- Script Configuration ---
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv" # Placeholder, will be replaced by master script
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" # Placeholder, will be replaced by master script
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv" # Placeholder, will be replaced by master script
+# --- Argument Parsing --- Added
+parser = argparse.ArgumentParser(description="ConvKNRM Training Script")
+parser.add_argument("--train_file", type=str, required=True, help="Path to the training data file.")
+parser.add_argument("--dev_file", type=str, required=True, help="Path to the development/validation data file.")
+parser.add_argument("--test_file", type=str, required=True, help="Path to the test data file.")
+args = parser.parse_args()
 
-EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt"
-EMBEDDING_DIMENSION = 100 # Should match the GloVe file used
+# --- Script Configuration ---
+TRAIN_FILE_PATH = args.train_file # Placeholder, will be replaced by master script
+DEV_FILE_PATH = args.dev_file # Placeholder, will be replaced by master script
+TEST_FILE_PATH = args.test_file # Placeholder, will be replaced by master script
+
+EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt" # NOTE: This path points to 100D embeddings. Update if using 300D.
+EMBEDDING_DIMENSION = 300 # Should match the GloVe file used - Changed to 300 to match notebook
 
 OUTPUT_DIR = Path("D:/SemanticSearch/trained_convknrm_model")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -207,10 +215,11 @@ model = mz.models.ConvKNRM()
 
 model.params['task'] = ranking_task
 model.params['embedding'] = embedding_matrix
-model.params['filters'] = FILTERS
-model.params['conv_activation_func'] = CONV_ACTIVATION_FUNC
-model.params['max_ngram'] = MAX_NGRAM
-model.params['use_crossmatch'] = USE_CROSSMATCH
+model.params['embedding_freeze'] = False # CHANGED FROM True
+model.params['filters'] = FILTERS # Added to match notebook
+model.params['conv_activation_func'] = CONV_ACTIVATION_FUNC # Added to match notebook
+model.params['max_ngram'] = MAX_NGRAM # Added to match notebook
+model.params['use_crossmatch'] = USE_CROSSMATCH # Added to match notebook
 model.params['kernel_num'] = KERNEL_NUM
 model.params['sigma'] = SIGMA
 model.params['exact_sigma'] = EXACT_SIGMA
@@ -224,6 +233,19 @@ print("Setting up Trainer...")
 optimizer = torch.optim.Adadelta(model.parameters()) # As per conv_knrm.ipynb
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=SCHEDULER_STEP_SIZE) # As per conv_knrm.ipynb
 
+# --- Determine the dataset name part from the path ---
+dataset_name_part = os.path.basename(os.path.dirname(TRAIN_FILE_PATH))
+
+# --- Define the base directory for this model type ---
+model_save_dir_base = "trained_convknrm_model"
+
+# --- Construct the full save directory path ---
+full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
+
+# --- Ensure the directory exists ---
+os.makedirs(full_save_dir, exist_ok=True)
+print(f"[ConvKNRM Script] Model will be saved in: {full_save_dir}")
+
 trainer = mz.trainers.Trainer(
     model=model,
     optimizer=optimizer,
@@ -232,7 +254,9 @@ trainer = mz.trainers.Trainer(
     validate_interval=None, # Validates at the end of each epoch
     epochs=EPOCHS,
     scheduler=scheduler,
-    clip_norm=CLIP_NORM # As per conv_knrm.ipynb
+    clip_norm=CLIP_NORM, # As per conv_knrm.ipynb
+    patience=EPOCHS,  # Added for early stopping consistency
+    key=ranking_task.metrics[0] # Added for early stopping consistency
 )
 print("Trainer setup complete.")
 

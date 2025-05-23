@@ -22,128 +22,47 @@ def get_user_data_paths():
     """Prompts the user to enter paths for train, dev, and test datasets."""
     print("--- Dataset Configuration ---")
     while True:
-        train_path = input("Enter the absolute path for the TRAINING dataset (e.g., D:\\\\\\\\data\\\\\\\\train.tsv or D:/data/train.tsv): ").strip()
+        train_path = input("Enter the absolute path for the TRAINING dataset (e.g., D:/data/train.tsv or D:/data/train.tsv): ").strip()
         if os.path.isfile(train_path):
             break
         print(f"Error: File not found or path is not a file: {train_path}. Please try again.")
 
     while True:
-        dev_path = input("Enter the absolute path for the DEVELOPMENT/VALIDATION dataset (e.g., D:\\\\\\\\data\\\\\\\\dev.tsv or D:/data/dev.tsv): ").strip()
+        dev_path = input("Enter the absolute path for the DEVELOPMENT/VALIDATION dataset (e.g., D:/data/dev.tsv or D:/data/dev.tsv): ").strip()
         if os.path.isfile(dev_path):
             break
         print(f"Error: File not found or path is not a file: {dev_path}. Please try again.")
 
     while True:
-        test_path = input("Enter the absolute path for the TEST dataset (e.g., D:\\\\\\\\data\\\\\\\\test.tsv or D:/data/test.tsv): ").strip()
+        test_path = input("Enter the absolute path for the TEST dataset (e.g., D:/data/test.tsv or D:/data/test.tsv): ").strip()
         if os.path.isfile(test_path):
             break
         print(f"Error: File not found or path is not a file: {test_path}. Please try again.")
     return train_path, dev_path, test_path # Corrected: test_file to test_path
 
-def modify_script_paths(script_path, train_file, dev_file, test_file):
-    try:
-        with open(script_path, 'r', encoding='utf-8') as f:
-            content = f.readlines()
-    except Exception as e:
-        print(f"Error reading script {script_path}: {e}")
-        return None
-
-    modified_content = []
-    path_vars = {
-        "TRAIN_FILE_PATH": train_file,
-        "DEV_FILE_PATH": dev_file,
-        "TEST_FILE_PATH": test_file
-    }
-
-    for line in content:
-        modified_line = line
-        stripped_line = line.strip()
-
-        for var_name, new_path_value in path_vars.items():
-            # DEBUG: Print path details
-            # print(f"DEBUG: Checking var: {var_name} in line: {stripped_line}") # Can be too verbose
-            if stripped_line.startswith(var_name) and "=" in stripped_line:
-                parts = stripped_line.split("=", 1)
-                if parts[0].strip() == var_name:
-                    # print(f"DEBUG: Matched variable {var_name} in line: {line.strip()}")
-                    
-                    current_normalized_path = str(new_path_value).replace('\\\\', '/')
-                    # print(f"DEBUG: For {var_name}, attempting to set path to: {current_normalized_path}")
-
-                    assignment_value_part = parts[1].strip()
-                    raw_prefix = ""
-                    quote_char = ''
-
-                    # Determine original quoting style
-                    if assignment_value_part.startswith("r\\\"") and assignment_value_part.endswith("\\\""):
-                        raw_prefix = "r"
-                        quote_char = '\\\"' 
-                        # print(f"DEBUG: Quoting style for {var_name}: r\\\"...\\\" (raw double quotes)")
-                    elif assignment_value_part.startswith("\\\"") and assignment_value_part.endswith("\\\""):
-                        quote_char = '\\\"'
-                        # print(f"DEBUG: Quoting style for {var_name}: \\\"...\\\" (standard double quotes)")
-                    elif assignment_value_part.startswith("r\'") and assignment_value_part.endswith("\'"):
-                        raw_prefix = "r"
-                        quote_char = "\\\'"
-                        # print(f"DEBUG: Quoting style for {var_name}: r\'...\' (raw single quotes)")
-                    elif assignment_value_part.startswith("\'") and assignment_value_part.endswith("\'"):
-                        quote_char = "\\\'"
-                        # print(f"DEBUG: Quoting style for {var_name}: \'...\' (standard single quotes)")
-                    else:
-                        # print(f"DEBUG: Quoting style for {var_name} NOT MATCHED. Assignment part: >>>{assignment_value_part}<<< Original line: >>>{line.strip()}<<<")
-                        # If quoting is unusual or not a path string, skip modification for this line to be safe
-                        continue 
-
-                    new_line_content = f"{var_name} = {raw_prefix}{quote_char}{current_normalized_path}{quote_char}"
-                    
-                    indentation = line[:len(line) - len(line.lstrip())]
-                    modified_line = indentation + new_line_content + "\\n"
-                    # print(f"DEBUG: Replaced line for {var_name}: {modified_line.strip()}")
-                    break 
-        modified_content.append(modified_line)
-    
-    final_script_str = "".join(modified_content)
-    # print("\\nDEBUG: First 25 lines of modified script content to be written:\\n" + "-"*30) # Keep this for verification
-    # print("\\n".join(final_script_str.splitlines()[:25]))
-    # print("-"*30 + "\\n")
-    return final_script_str
-
 def run_training_script(script_path, train_file, dev_file, test_file):
     """
-    Modifies the target script with new data paths, saves it to a temporary file,
-    runs the temporary file, and then deletes it.
+    Runs the target training script by passing dataset paths as command-line arguments.
     """
     print(f"--- Training Model from: {os.path.basename(script_path)} ---")
 
-    modified_script_content = modify_script_paths(script_path, train_file, dev_file, test_file)
-
-    if not modified_script_content:
-        print(f"Failed to modify script {script_path}. Skipping.")
-        return False
-
-    # Create a temporary file path
-    base, ext = os.path.splitext(script_path)
-    temp_script_path = f"{base}_temp{ext}" # e.g., DRMM_training_script_temp.py
-
+    project_root_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    command = [
+        sys.executable, 
+        script_path,
+        "--train_file", train_file,
+        "--dev_file", dev_file,
+        "--test_file", test_file
+    ]
+    
+    print(f"Running script: {' '.join(command)} with cwd: {project_root_dir}...")
     try:
-        with open(temp_script_path, 'w', encoding='utf-8') as f:
-            f.write(modified_script_content)
-        # print(f"DEBUG: Successfully wrote modified content to temporary file: {temp_script_path}")
-
-        # DEBUG: Optionally, read back and print a few lines from the temp file
-        # try:
-        #     with open(temp_script_path, 'r', encoding='utf-8') as f_check:
-        #         print(f"\\\\nDEBUG: First 10 lines read back from temp file '{temp_script_path}':\\\\n" + "-"*30)
-        #         print("".join(f_check.readlines()[:10]))
-        #         print("-"*30 + "\\\\n")
-        # except Exception as e_read_check:
-        #     print(f"DEBUG: Could not read back temp file for verification: {e_read_check}")
-
-        project_root_dir = os.path.dirname(os.path.abspath(__file__))
-        print(f"Running modified temporary script: {temp_script_path} with cwd: {project_root_dir}...")
         process = subprocess.run(
-            [sys.executable, temp_script_path],
-            capture_output=False, text=True, check=False,
+            command,
+            capture_output=False, # Set to True if you want to capture stdout/stderr
+            text=True, 
+            check=False, # Set to True to raise an exception for non-zero exit codes
             cwd=project_root_dir  # Set current working directory
         )
 
@@ -151,24 +70,22 @@ def run_training_script(script_path, train_file, dev_file, test_file):
             print(f"Successfully completed training for {os.path.basename(script_path)}.")
             success = True
         else:
-            print(f"Error during training of {os.path.basename(script_path)} (using {temp_script_path}).")
+            print(f"Error during training of {os.path.basename(script_path)}.")
             print(f"Return code: {process.returncode}")
+            # if process.stdout: # Removed as capture_output is False
+            #     print("Stdout:\\n", process.stdout)
+            # if process.stderr: # Removed as capture_output is False
+            #     print("Stderr:\\n", process.stderr)
             print("Check the output above for specific error messages from the script.")
             success = False
         return success
 
-    except Exception as e:
-        print(f"An error occurred while preparing or running {temp_script_path} for {script_path}: {e}")
+    except FileNotFoundError:
+        print(f"Error: The script {script_path} was not found.")
         return False
-    finally:
-        # Clean up: remove temporary script
-        if os.path.exists(temp_script_path):
-            try:
-                os.remove(temp_script_path)
-                # print(f"DEBUG: Successfully deleted temporary script: {temp_script_path}")
-            except Exception as e_del:
-                print(f"Warning: Could not delete temporary script {temp_script_path}: {e_del}")
-        # Original script at script_path is not modified by this function.
+    except Exception as e:
+        print(f"An error occurred while running {script_path}: {e}")
+        return False
 
 def main():
     print("--- Master Training Script ---")

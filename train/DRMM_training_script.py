@@ -7,6 +7,7 @@ import os
 import sys # ADDED
 from pathlib import Path
 import json # ADDED for saving config
+import argparse # Added for command-line arguments
 # from Tool.transform_data import transform_to_matchzoo_format # Moved down
 from datetime import datetime # ADDED for saving config
 
@@ -24,8 +25,28 @@ print(f"PyTorch version: {torch.__version__}")
 print(f"NumPy version: {np.__version__}")
 print(f"Pandas version: {pd.__version__}")
 
-EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.100d.txt"
-EMBEDDING_DIMENSION = 100 
+# --- Argument Parsing ---
+parser = argparse.ArgumentParser(description="DRMM Training Script")
+parser.add_argument("--train_file", type=str, required=True, help="Path to the training data file.")
+parser.add_argument("--dev_file", type=str, required=True, help="Path to the development/validation data file.")
+parser.add_argument("--test_file", type=str, required=True, help="Path to the test data file.")
+args = parser.parse_args()
+
+# Determine the dataset name part from the path
+dataset_name_part = os.path.basename(args.train_file)
+
+# Define the base directory for this model type
+model_save_dir_base = "trained_drmm_model"
+
+# Construct the full save directory path
+full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
+
+# Ensure the directory exists
+os.makedirs(full_save_dir, exist_ok=True)
+print(f"[DRMM Script] Model will be saved in: {full_save_dir}")
+
+EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt" # NOTE: This path points to 100D. Update if using 300D.
+EMBEDDING_DIMENSION = 300 # Changed from 100 to 300 to match notebook
 
 OUTPUT_DIR = Path("D:/SemanticSearch/trained_drmm_model")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -92,9 +113,9 @@ def load_triplet_data_from_tsv(file_path, delimiter='\t'):
     except Exception as e:
         print(f"ERROR: Could not read file {file_path}: {e}")
         return []
-TRAIN_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_train_mz.tsv"
-DEV_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
-TEST_FILE_PATH = r"D:/SemanticSearch/TrainingData_MatchZoo_BEIR/msmarco_semantic-grouping/train_2/msmarco_semantic-grouping_train_dev_mz.tsv"
+TRAIN_FILE_PATH = args.train_file
+DEV_FILE_PATH = args.dev_file
+TEST_FILE_PATH = args.test_file
 
 source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
 source_test_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
@@ -181,20 +202,22 @@ validset = mz.dataloader.Dataset(
 trainloader = mz.dataloader.DataLoader(
     dataset=trainset,
     stage='train',
-    callback=padding_callback
+    callback=padding_callback,
+    device='cpu' # Added to match notebook
 )
 validloader = mz.dataloader.DataLoader(
     dataset=validset,
     stage='dev',
-    callback=padding_callback
+    callback=padding_callback,
+    device='cpu' # Added to match notebook
 )
 print("Datasets and DataLoaders created.")
 
 print("Setting up DRMM model...")
 model = mz.models.DRMM()
-
 model.params['task'] = ranking_task
 model.params['embedding'] = embedding_matrix
+model.params['embedding_freeze'] = False # Ensure embeddings are trainable
 model.params['mask_value'] = 0
 model.params['hist_bin_size'] = HIST_BIN_SIZE
 model.params['mlp_num_layers'] = 1
@@ -203,20 +226,27 @@ model.params['mlp_num_fan_out'] = 1
 model.params['mlp_activation_func'] = 'tanh'
 
 model.build()
-print(model)
+print("DRMM Model built.")
 print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
 print("Setting up Trainer...")
-optimizer = torch.optim.Adadelta(model.parameters())
+optimizer = torch.optim.Adadelta(model.parameters()) # Changed from Adam to Adadelta to match notebook
+# scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3) # Optional: add if needed
+
+NUM_TRAIN_EPOCHS = 10 # Ensure this is defined, e.g., 10 or from args
 
 trainer = mz.trainers.Trainer(
     model=model,
     optimizer=optimizer,
     trainloader=trainloader,
     validloader=validloader,
-    validate_interval=None, # Validates at the end of each epoch
-    epochs=EPOCHS,
-    patience=EPOCHS # MODIFIED: Set patience to EPOCHS to run all epochs
+    validate_interval=None, 
+    epochs=NUM_TRAIN_EPOCHS, # Use defined epochs
+    # scheduler=scheduler, # Optional
+    clip_norm=10, # Optional: add if needed
+    patience=NUM_TRAIN_EPOCHS, # Added patience for early stopping if validloader is used
+    key=ranking_task.metrics[0], # Monitor the first metric for early stopping
+    device='cpu' # Added to match notebook
 )
 print("Trainer setup complete.")
 
