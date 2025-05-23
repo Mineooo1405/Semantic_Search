@@ -9,6 +9,7 @@ import json # Added for saving config
 import sys # Added
 import shutil # Added for rmtree
 import argparse # Added for command-line arguments
+from datetime import datetime # ADDED to fix missing import
 
 # from transform_data import transform_to_matchzoo_format # Removed unused import
 
@@ -25,21 +26,26 @@ parser.add_argument("--test_file", type=str, required=True, help="Path to the te
 args = parser.parse_args()
 
 # --- Script Configuration ---
-TRAIN_FILE_PATH = args.train_file # Placeholder, will be replaced by master script
-DEV_FILE_PATH = args.dev_file # Placeholder, will be replaced by master script
-TEST_FILE_PATH = args.test_file # Placeholder, will be replaced by master script
+TRAIN_FILE_PATH = args.train_file
+DEV_FILE_PATH = args.dev_file
+TEST_FILE_PATH = args.test_file
 
-EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt" # NOTE: This path points to 100D embeddings. Update if using 300D.
-EMBEDDING_DIMENSION = 300 # Should match the GloVe file used - Changed to 300 to match notebook
+EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt"
+EMBEDDING_DIMENSION = 300
 
-OUTPUT_DIR = Path("D:/SemanticSearch/trained_convknrm_model")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_SAVE_PATH = OUTPUT_DIR / "model.pt"
-PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "preprocessor.dill"
-CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json" # ADDED for saving config
+# --- Determine the dataset name part and set up output directory --- Added and moved up
+dataset_name_part = os.path.basename(os.path.dirname(TRAIN_FILE_PATH)) # Takes parent directory of train file
+model_save_dir_base = "trained_convknrm_model"
+full_save_dir = Path(model_save_dir_base) / dataset_name_part
+full_save_dir.mkdir(parents=True, exist_ok=True)
+print(f"[ConvKNRM Script] All outputs will be saved in: {full_save_dir}")
+
+MODEL_SAVE_PATH = full_save_dir / "convknrm_model.pt" # MODIFIED name for clarity
+PREPROCESSOR_SAVE_PATH = full_save_dir / "convknrm_preprocessor.dill" # MODIFIED name for clarity
+CONFIG_SAVE_PATH = full_save_dir / "convknrm_config.json" # MODIFIED name for clarity
 
 # ConvKNRM specific parameters (from conv_knrm.ipynb)
-BATCH_SIZE = 20
+BATCH_SIZE = 32 # CHANGED from 20
 EPOCHS = 10
 FILTERS = 128
 CONV_ACTIVATION_FUNC = 'tanh'
@@ -69,7 +75,7 @@ except LookupError:
 
 # --- Task Definition (from init.ipynb, used by conv_knrm.ipynb) ---
 print("Defining ranking task for ConvKNRM...")
-ranking_task = mz.tasks.Ranking(losses=mz.losses.RankHingeLoss())
+ranking_task = mz.tasks.Ranking(losses=mz.losses.RankHingeLoss(num_neg=4, margin=0.2)) # CHANGED
 ranking_task.metrics = [
     mz.metrics.NormalizedDiscountedCumulativeGain(k=3),
     mz.metrics.NormalizedDiscountedCumulativeGain(k=5),
@@ -183,7 +189,7 @@ trainset = mz.dataloader.Dataset(
     data_pack=train_pack_processed,
     mode='pair',
     num_dup=5,      # From conv_knrm.ipynb trainset
-    num_neg=1,      # From conv_knrm.ipynb trainset (RankHingeLoss implies 1 neg)
+    num_neg=4,      # CHANGED From conv_knrm.ipynb trainset (RankHingeLoss implies 1 neg)
     batch_size=BATCH_SIZE,
     resample=True,
     sort=False,
@@ -230,33 +236,21 @@ print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requir
 
 # --- Trainer Setup (from conv_knrm.ipynb) ---
 print("Setting up Trainer...")
-optimizer = torch.optim.Adadelta(model.parameters()) # As per conv_knrm.ipynb
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=SCHEDULER_STEP_SIZE) # As per conv_knrm.ipynb
-
-# --- Determine the dataset name part from the path ---
-dataset_name_part = os.path.basename(os.path.dirname(TRAIN_FILE_PATH))
-
-# --- Define the base directory for this model type ---
-model_save_dir_base = "trained_convknrm_model"
-
-# --- Construct the full save directory path ---
-full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
-
-# --- Ensure the directory exists ---
-os.makedirs(full_save_dir, exist_ok=True)
-print(f"[ConvKNRM Script] Model will be saved in: {full_save_dir}")
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=SCHEDULER_STEP_SIZE)
 
 trainer = mz.trainers.Trainer(
     model=model,
     optimizer=optimizer,
     trainloader=trainloader,
     validloader=validloader,
-    validate_interval=None, # Validates at the end of each epoch
+    validate_interval=None,
     epochs=EPOCHS,
     scheduler=scheduler,
-    clip_norm=CLIP_NORM, # As per conv_knrm.ipynb
-    patience=EPOCHS,  # Added for early stopping consistency
-    key=ranking_task.metrics[0] # Added for early stopping consistency
+    clip_norm=CLIP_NORM,
+    save_dir=str(full_save_dir), # MODIFIED: Ensure it's a string
+    patience=EPOCHS,
+    key=ranking_task.metrics[0]
 )
 print("Trainer setup complete.")
 
@@ -301,58 +295,11 @@ print("Training finished or error occurred.")
 print(f"Saving model to: {MODEL_SAVE_PATH}")
 torch.save(model.state_dict(), MODEL_SAVE_PATH)
 
-# --- Save Preprocessor (handling MatchZoo's directory creation) ---
-# Define a temporary path for MatchZoo to save, which might be a directory
-TEMP_PREPROCESSOR_PATH = OUTPUT_DIR / "temp_preprocessor_save"
-ACTUAL_PREPROCESSOR_FILE_INSIDE_TEMP = TEMP_PREPROCESSOR_PATH / "preprocessor.dill" # Common pattern for mz
+print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}")
+preprocessor.save(PREPROCESSOR_SAVE_PATH)
 
-print(f"Attempting to save preprocessor via MatchZoo to a temporary location: {TEMP_PREPROCESSOR_PATH}")
-preprocessor.save(TEMP_PREPROCESSOR_PATH)
-
-# Check if MatchZoo created a directory with preprocessor.dill inside
-if TEMP_PREPROCESSOR_PATH.is_dir() and ACTUAL_PREPROCESSOR_FILE_INSIDE_TEMP.is_file():
-    print(f"MatchZoo created a directory. Moving {ACTUAL_PREPROCESSOR_FILE_INSIDE_TEMP} to {PREPROCESSOR_SAVE_PATH}")
-    # Ensure the target directory exists (it should, from OUTPUT_DIR.mkdir)
-    PREPROCESSOR_SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # If PREPROCESSOR_SAVE_PATH already exists and is a directory (from a previous failed run), remove it
-    if PREPROCESSOR_SAVE_PATH.is_dir():
-        print(f"Removing existing directory at target preprocessor path: {PREPROCESSOR_SAVE_PATH}")
-        shutil.rmtree(PREPROCESSOR_SAVE_PATH)
-    elif PREPROCESSOR_SAVE_PATH.is_file():
-        print(f"Removing existing file at target preprocessor path: {PREPROCESSOR_SAVE_PATH}")
-        PREPROCESSOR_SAVE_PATH.unlink()
-
-    shutil.move(str(ACTUAL_PREPROCESSOR_FILE_INSIDE_TEMP), str(PREPROCESSOR_SAVE_PATH))
-    print(f"Preprocessor moved to: {PREPROCESSOR_SAVE_PATH}")
-    # Clean up the temporary directory structure created by MatchZoo
-    try:
-        shutil.rmtree(TEMP_PREPROCESSOR_PATH)
-        print(f"Cleaned up temporary directory: {TEMP_PREPROCESSOR_PATH}")
-    except OSError as e:
-        print(f"Warning: Could not remove temporary directory {TEMP_PREPROCESSOR_PATH}: {e}")
-elif TEMP_PREPROCESSOR_PATH.is_file(): # If it saved directly as a file (less likely based on behavior)
-    print(f"MatchZoo saved preprocessor directly as a file. Moving {TEMP_PREPROCESSOR_PATH} to {PREPROCESSOR_SAVE_PATH}")
-    # Ensure the target directory exists
-    PREPROCESSOR_SAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if PREPROCESSOR_SAVE_PATH.is_dir():
-        shutil.rmtree(PREPROCESSOR_SAVE_PATH)
-    elif PREPROCESSOR_SAVE_PATH.is_file():
-        PREPROCESSOR_SAVE_PATH.unlink()
-        
-    shutil.move(str(TEMP_PREPROCESSOR_PATH), str(PREPROCESSOR_SAVE_PATH))
-    print(f"Preprocessor moved to: {PREPROCESSOR_SAVE_PATH}")
-else:
-    print(f"Warning: Preprocessor saving did not result in an expected file/directory at {TEMP_PREPROCESSOR_PATH}. Check MatchZoo behavior.")
-    print(f"Saving preprocessor directly to intended path: {PREPROCESSOR_SAVE_PATH} as a fallback.")
-    # Fallback: try saving directly to the final intended path if the temp logic failed unexpectedly
-    # This might recreate the nested folder issue if MatchZoo insists, but it's a fallback.
-    if PREPROCESSOR_SAVE_PATH.is_dir(): # If it's a dir from a previous attempt, remove it
-        shutil.rmtree(PREPROCESSOR_SAVE_PATH)
-    preprocessor.save(PREPROCESSOR_SAVE_PATH)
-
-
-# --- Save Configuration ---
-print(f"Saving configuration to: {CONFIG_SAVE_PATH}")
+# --- Create and Save Config Dictionary ---
+# (Assuming safe_get_param_value is defined and works as intended)
 config_to_save = {
     "model_name": "ConvKNRM",
     "model_class": model.__class__.__name__,
@@ -361,9 +308,9 @@ config_to_save = {
     # For RankHingeLoss, num_neg is not directly on the loss object in the same way as RankCrossEntropyLoss
     # It's often handled by the DataLoader (num_neg=1 in this script's trainset)
     # We can record the dataloader's num_neg if that's the intended information
-    "dataloader_num_neg_for_loss_effect": trainset._num_neg if hasattr(trainset, '_num_neg') else None,
+    "dataloader_num_neg_for_loss_effect": trainset._num_neg if hasattr(trainset, '_num_neg') else None, # This will now reflect 4
     "optimizer_class": optimizer.__class__.__name__,
-    "learning_rate": optimizer.defaults.get('lr'),
+    "learning_rate": optimizer.param_groups[0]['lr'], # CHANGED to get lr from Adam
     "model_hyperparameters_used": {
         "filters": safe_get_param_value(model.params, 'filters', FILTERS),
         "conv_activation_func": safe_get_param_value(model.params, 'conv_activation_func', CONV_ACTIVATION_FUNC),
@@ -397,23 +344,14 @@ config_to_save = {
     "vocab_size_from_preprocessor_context": preprocessor.context.get('vocab_size'),
     "embedding_input_dim_from_preprocessor_context": preprocessor.context.get('embedding_input_dim'),
     "matchzoo_version": mz.__version__,
-    "training_script": os.path.basename(__file__),
-    "training_date": pd.Timestamp.now().isoformat()
+    "training_script_path": str(Path(__file__).resolve()), # Added for traceability
+    "timestamp": datetime.now().isoformat() # Added for traceability
 }
 
-# Ensure all values in model_hyperparameters_used are serializable
-for key, value in config_to_save.get("model_hyperparameters_used", {}).items():
-    if isinstance(value, np.integer):
-        config_to_save["model_hyperparameters_used"][key] = int(value)
-    elif isinstance(value, np.floating):
-        config_to_save["model_hyperparameters_used"][key] = float(value)
-    elif isinstance(value, np.ndarray):
-        config_to_save["model_hyperparameters_used"][key] = value.tolist()
-    elif not isinstance(value, (str, int, float, bool, list, dict, type(None))):
-        config_to_save["model_hyperparameters_used"][key] = str(value)
-
+print(f"Saving config to: {CONFIG_SAVE_PATH}")
 with open(CONFIG_SAVE_PATH, 'w') as f:
     json.dump(config_to_save, f, indent=4)
-print(f"Configuration saved to {CONFIG_SAVE_PATH}")
+
+print("All artifacts (model, preprocessor, config) saved.")
 
 print("ConvKNRM training script finished.") # Added to signify end

@@ -9,6 +9,7 @@ from pathlib import Path
 import json # ADDED for saving config
 import dill # ADDED for saving preprocessor explicitly
 import argparse # Added for command-line arguments
+from datetime import datetime # ADDED for timestamp
 
 # --- Helper function to safely get parameter values ---
 def safe_get_param_value(params_table, key, default_val):
@@ -37,7 +38,7 @@ except LookupError:
 
 # --- Task Definition ---
 print("Defining ranking task for MatchLSTM...")
-ranking_task = mz.tasks.Ranking(losses=mz.losses.RankCrossEntropyLoss(num_neg=10))
+ranking_task = mz.tasks.Ranking(losses=mz.losses.RankCrossEntropyLoss(num_neg=4))
 ranking_task.metrics = [
     mz.metrics.NormalizedDiscountedCumulativeGain(k=3),
     mz.metrics.NormalizedDiscountedCumulativeGain(k=5),
@@ -45,20 +46,25 @@ ranking_task.metrics = [
 ]
 print(f"`ranking_task` initialized with loss: {ranking_task.losses[0]} and metrics: {ranking_task.metrics}") 
 
-# --- Helper function to load triplet data from TSV ---
-def load_triplet_data_from_tsv(file_path):
-    print(f"Loading triplet data from: {file_path}")
-    data = []
+# --- Helper function to load triplet data from TSV and convert to pairs ---
+def load_pair_from_triplet(file_path, delimiter='\t'): # MODIFIED: Corrected delimiter
+    """Convert a TSV triplet file (q, pos, neg) into two rows with numeric labels."""
+    rows = []
+    print(f"Loading and converting triplet data from: {file_path} with delimiter '{delimiter}'")
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split('\t')
+            for i, line in enumerate(f):
+                parts = line.strip().split(delimiter)
                 if len(parts) == 3:
-                    data.append(parts)
+                    q, pos, neg = parts
+                    rows.append({'text_left': q, 'text_right': pos, 'label': 1})
+                    rows.append({'text_left': q, 'text_right': neg, 'label': 0})
                 else:
-                    print(f"Skipping malformed line (expected 3 columns, got {len(parts)}): {line.strip()}")
-        print(f"Loaded {len(data)} triplets.")
-        return data
+                    print(f"Skipping malformed line #{i+1} (expected 3 columns, got {len(parts)}): {line.strip()}")
+        print(f"Loaded and converted {len(rows)//2} triplets (resulting in {len(rows)} pairs) from {file_path}.")
+        if not rows:
+            print(f"WARNING: No data loaded/converted from {file_path}. Check the file format and delimiter.")
+        return rows # Returns a list of dicts
     except FileNotFoundError:
         print(f"ERROR: File not found: {file_path}")
         return []
@@ -79,12 +85,17 @@ dataset_name_part = os.path.basename(args.train_file)
 # Define the base directory for this model type
 model_save_dir_base = "trained_matchlstm_model"
 
-# Construct the full save directory path
-full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
+# Construct the full save directory path using pathlib for robustness
+full_save_dir = Path(model_save_dir_base) / dataset_name_part
 
 # Ensure the directory exists
-os.makedirs(full_save_dir, exist_ok=True)
-print(f"[MatchLSTM Script] Model will be saved in: {full_save_dir}")
+full_save_dir.mkdir(parents=True, exist_ok=True)
+print(f"[MatchLSTM Script] All outputs will be saved in: {full_save_dir}")
+
+# --- Define artifact paths based on full_save_dir --- MODIFIED
+MODEL_SAVE_PATH = full_save_dir / "matchlstm_model.pt"
+PREPROCESSOR_SAVE_PATH = full_save_dir / "matchlstm_preprocessor.dill"
+CONFIG_SAVE_PATH = full_save_dir / "matchlstm_config.json"
 
 # --- Load CUSTOM Dataset --- 
 print("Loading CUSTOM dataset.")
@@ -92,17 +103,17 @@ TRAIN_FILE_PATH = args.train_file
 DEV_FILE_PATH = args.dev_file
 TEST_FILE_PATH = args.test_file # Using dev for test
 
-source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
-source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
-source_test_data = load_triplet_data_from_tsv(TEST_FILE_PATH)
+source_train_data = load_pair_from_triplet(TRAIN_FILE_PATH)
+source_dev_data = load_pair_from_triplet(DEV_FILE_PATH)
+source_test_data = load_pair_from_triplet(TEST_FILE_PATH)
 
 # transformed_train_data = transform_to_matchzoo_format(source_train_data)
 # transformed_dev_data = transform_to_matchzoo_format(source_dev_data)
 # transformed_test_data = transform_to_matchzoo_format(source_test_data)
 
-train_df = pd.DataFrame(source_train_data, columns=['text_left', 'text_right', 'label'])
-dev_df = pd.DataFrame(source_dev_data, columns=['text_left', 'text_right', 'label'])
-test_df = pd.DataFrame(source_test_data, columns=['text_left', 'text_right', 'label'])
+train_df = pd.DataFrame(source_train_data) # No need for columns if data is list of dicts
+dev_df = pd.DataFrame(source_dev_data)     # No need for columns
+test_df = pd.DataFrame(source_test_data)    # No need for columns
 
 if not train_df.empty:
     train_pack_raw = mz.pack(train_df)
@@ -195,13 +206,13 @@ embedding_matrix = embedding_matrix / l2_norm
 print("Embeddings processed and normalized.")
 print(f"Final embedding matrix for model shape: {embedding_matrix.shape}")
 
-BATCH_SIZE = 20 # Defined BATCH_SIZE
+BATCH_SIZE = 32 # MODIFIED from 20 to 32 as per recommendation
 print("Creating MatchZoo Datasets for MatchLSTM...")
 trainset = mz.dataloader.Dataset(
     data_pack=train_pack_processed,
     mode='pair',
-    num_dup=5,
-    num_neg=10,
+    num_dup=1,
+    num_neg=4,
     batch_size=BATCH_SIZE, # Used BATCH_SIZE
     resample=True,
     sort=False,
@@ -248,7 +259,7 @@ print(f'Trainable parameters: {trainable_params}')
 
 # --- Trainer Setup ---
 print("Setting up Trainer...")
-optimizer = torch.optim.Adadelta(model.parameters()) # CHANGED from Adam to Adadelta to match notebook
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4) # CHANGED from Adadelta to Adam with lr=1e-4
 NUM_TRAIN_EPOCHS = 10 # ADDED: Define configured epochs
 trainer = mz.trainers.Trainer(
     model=model,
@@ -257,6 +268,7 @@ trainer = mz.trainers.Trainer(
     validloader=validloader,
     validate_interval=None,
     epochs=NUM_TRAIN_EPOCHS, # CHANGED: Use the variable
+    save_dir=str(full_save_dir), # ADDED: Ensure trainer saves to the correct dynamic folder
     patience=NUM_TRAIN_EPOCHS, # Use a reasonable patience for early stopping
     key=ranking_task.metrics[0] # Monitor the first metric for early stopping
 )
@@ -267,14 +279,8 @@ print("Starting MatchLSTM model training...")
 trainer.run()
 print("MatchLSTM model training finished.")
 
-# --- Consolidate Artifact Saving ---
+# --- Consolidate Artifact Saving --- MODIFIED to use new paths
 print("Preparing and saving model, preprocessor, and config...")
-MODEL_SAVE_DIR = "trained_matchlstm_model"
-os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
-
-MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, "model.pt")
-PREPROCESSOR_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, "preprocessor.dill")
-CONFIG_SAVE_PATH = os.path.join(MODEL_SAVE_DIR, "config.json")
 
 # 1. Create Config Dictionary
 # This uses the `preprocessor` object that was fitted by the initial `fit_transform(train_pack_raw)`
@@ -312,8 +318,8 @@ config_to_save = {
     "vocab_size_from_preprocessor_context": preprocessor.context.get('vocab_size'),
     "embedding_input_dim_from_preprocessor_context": preprocessor.context.get('embedding_input_dim'),
     "matchzoo_version": mz.__version__,
-    "training_script": os.path.basename(__file__),
-    "training_date": pd.Timestamp.now().isoformat()
+    "training_script_path": str(Path(__file__).resolve()), # Added for traceability
+    "timestamp": datetime.now().isoformat() # MODIFIED for consistency
 }
 
 # Ensure all values in model_hyperparameters_used are serializable

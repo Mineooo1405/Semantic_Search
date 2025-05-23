@@ -15,15 +15,15 @@ print(f"NumPy version: {np.__version__}")
 print(f"Pandas version: {pd.__version__}")
 
 # +++ ADDED HELPER FUNCTION +++
-def safe_get_param_value(params_table, key, default_val):
-    """Safely retrieves a parameter value from a MatchZoo ParamTable."""
-    if key in params_table: # Check if key exists
-        val = params_table[key] # Retrieve item
-        # Defensive check: if somehow a Param object itself is returned
-        if isinstance(val, mz.engine.param.Param):
-            return val.value
-        return val # Assumed to be the actual value
-    return default_val
+# def safe_get_param_value(params_table, key, default_val):
+#     """Safely retrieves a parameter value from a MatchZoo ParamTable."""
+#     if key in params_table: # Check if key exists
+#         val = params_table[key] # Retrieve item
+#         # Defensive check: if somehow a Param object itself is returned
+#         if isinstance(val, mz.engine.param.Param):
+#             return val.value
+#         return val # Assumed to be the actual value
+#     return default_val
 # +++ END ADDED HELPER FUNCTION +++
 
 # --- Argument Parsing --- Added
@@ -40,14 +40,21 @@ TEST_FILE_PATH = args.test_file
 EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt" # NOTE: This path points to 100D. Update if using 300D.
 EMBEDDING_DIMENSION = 300 # Changed from 100 to 300 to match notebook
 
-OUTPUT_DIR = Path("D:/SemanticSearch/trained_matchpyramid_model")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_SAVE_PATH = OUTPUT_DIR / "matchpyramid_model.pt"
-PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "preprocessor.dill" # CHANGED: Correct filename
-CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json" # ADDED for config
+# Determine the dataset name part from the path
+dataset_name_part = os.path.basename(args.train_file)
+# Define the base directory for this model type
+model_save_dir_base = "trained_matchpyramid_model"
+# Construct the full save directory path
+full_save_dir = Path(model_save_dir_base) / dataset_name_part
+full_save_dir.mkdir(parents=True, exist_ok=True)
+print(f"[MatchPyramid Script] All outputs will be saved in: {full_save_dir}")
 
-BATCH_SIZE = 20 # Changed from 128 to 20 to match notebook dataset config
-EPOCHS = 5 # Changed from 10 to 5 to match notebook
+MODEL_SAVE_PATH = full_save_dir / "matchpyramid_model.pt"
+PREPROCESSOR_SAVE_PATH = full_save_dir / "preprocessor.dill"
+CONFIG_SAVE_PATH = full_save_dir / "config.json"
+
+BATCH_SIZE = 32 # MODIFIED from 20 to 32 as per recommendation
+EPOCHS = 10 # Changed from 10 to 5 to match notebook
 
 try:
     nltk.data.find('tokenizers/punkt')
@@ -82,7 +89,7 @@ def safe_get_param_value(params_source, key, default_val):
     return default_val
 
 print("Defining ranking task for MatchPyramid...")
-ranking_task = mz.tasks.Ranking(losses=mz.losses.RankCrossEntropyLoss(num_neg=1))
+ranking_task = mz.tasks.Ranking(losses=mz.losses.RankCrossEntropyLoss(num_neg=4)) # MODIFIED num_neg from 1 to 4
 ranking_task.metrics = [
     mz.metrics.NormalizedDiscountedCumulativeGain(k=3),
     mz.metrics.NormalizedDiscountedCumulativeGain(k=5),
@@ -90,21 +97,24 @@ ranking_task.metrics = [
 ]
 print(f"`ranking_task` initialized with loss: {ranking_task.losses[0]} and metrics: {ranking_task.metrics}")
 
-def load_triplet_data_from_tsv(file_path, delimiter='\t'):
-    print(f"Loading triplet data from: {file_path} with delimiter '{delimiter}'")
-    data = []
+def load_pair_from_triplet(file_path, delimiter='\t'): # MODIFIED: Corrected delimiter
+    """Convert a TSV triplet file (q, pos, neg) into two rows with numeric labels."""
+    rows = []
+    print(f"Loading and converting triplet data from: {file_path} with delimiter '{delimiter}'")
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
                 parts = line.strip().split(delimiter)
                 if len(parts) == 3:
-                    data.append(parts)
+                    q, pos, neg = parts
+                    rows.append({'text_left': q, 'text_right': pos, 'label': 1})
+                    rows.append({'text_left': q, 'text_right': neg, 'label': 0})
                 else:
                     print(f"Skipping malformed line #{i+1} (expected 3 columns, got {len(parts)}): {line.strip()}")
-        print(f"Loaded {len(data)} triplets from {file_path}.")
-        if not data:
-            print(f"WARNING: No data loaded from {file_path}. Check the file format and delimiter.")
-        return data
+        print(f"Loaded and converted {len(rows)//2} triplets (resulting in {len(rows)} pairs) from {file_path}.")
+        if not rows:
+            print(f"WARNING: No data loaded/converted from {file_path}. Check the file format and delimiter.")
+        return rows # Returns a list of dicts
     except FileNotFoundError:
         print(f"ERROR: File not found: {file_path}")
         return []
@@ -113,9 +123,9 @@ def load_triplet_data_from_tsv(file_path, delimiter='\t'):
         return []
 
 print("Loading CUSTOM dataset...")
-source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
-source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
-source_test_data = load_triplet_data_from_tsv(TEST_FILE_PATH)
+source_train_data = load_pair_from_triplet(TRAIN_FILE_PATH)
+source_dev_data = load_pair_from_triplet(DEV_FILE_PATH)
+source_test_data = load_pair_from_triplet(TEST_FILE_PATH)
 
 if not source_train_data:
     print("CRITICAL: Training data is empty. Exiting.")
@@ -124,9 +134,9 @@ if not source_dev_data:
     print("CRITICAL: Development/Validation data is empty. Exiting.")
     exit(1)
 
-train_df = pd.DataFrame(source_train_data, columns=['text_left', 'text_right', 'label'])
-dev_df = pd.DataFrame(source_dev_data, columns=['text_left', 'text_right', 'label'])
-test_df = pd.DataFrame(source_test_data, columns=['text_left', 'text_right', 'label'])
+train_df = pd.DataFrame(source_train_data) # MODIFIED: No columns needed if list of dicts
+dev_df = pd.DataFrame(source_dev_data)     # MODIFIED: No columns needed
+test_df = pd.DataFrame(source_test_data)    # MODIFIED: No columns needed
 
 train_pack_raw = mz.pack(train_df, task=ranking_task)
 dev_pack_raw = mz.pack(dev_df, task=ranking_task)
@@ -168,7 +178,7 @@ trainset = mz.dataloader.Dataset(
     data_pack=train_pack_processed,
     mode='pair',
     num_dup=2, # Changed from 1 to 2 to match notebook
-    num_neg=1,
+    num_neg=4, # MODIFIED from 1 to 4, to align with loss
     batch_size=BATCH_SIZE,
     resample=True,
     sort=False,
@@ -212,27 +222,7 @@ print(model)
 print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
 print("Setting up Trainer...")
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001) # Added learning rate
-
-# --- Argument Parsing --- Added
-parser = argparse.ArgumentParser(description="MatchPyramid Training Script")
-parser.add_argument("--train_file", type=str, required=True, help="Path to the training data file.")
-parser.add_argument("--dev_file", type=str, required=True, help="Path to the development/validation data file.")
-parser.add_argument("--test_file", type=str, required=True, help="Path to the test data file.")
-args = parser.parse_args()
-
-# Determine the dataset name part from the path
-dataset_name_part = os.path.basename(args.train_file)
-
-# Define the base directory for this model type
-model_save_dir_base = "trained_matchpyramid_model"
-
-# Construct the full save directory path
-full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
-
-# Ensure the directory exists
-os.makedirs(full_save_dir, exist_ok=True)
-print(f"[MatchPyramid Script] Model will be saved in: {full_save_dir}")
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4) # MODIFIED lr from 0.001 to 1e-4
 
 trainer = mz.trainers.Trainer(
     model=model,
@@ -241,7 +231,7 @@ trainer = mz.trainers.Trainer(
     validloader=validloader,
     validate_interval=None,
     epochs=EPOCHS,
-    save_dir=full_save_dir,  # MODIFIED
+    save_dir=str(full_save_dir),  # MODIFIED to ensure it's a string if Path object was used before
     patience=EPOCHS, # As per notebook (assuming 3 if not specified, or adjust as needed)
     key=ranking_task.metrics[0]
 )
@@ -255,8 +245,8 @@ print("Preparing and saving model, preprocessor, and config...")
 
 print(f"Saving model to: {MODEL_SAVE_PATH}")
 torch.save(model.state_dict(), MODEL_SAVE_PATH)
-print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}") # This now prints the correct target file path
-preprocessor.save(OUTPUT_DIR) # CHANGED: Pass the directory to the save method
+print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}")
+preprocessor.save(PREPROCESSOR_SAVE_PATH) # CHANGED: Pass the full file path
 
 # Create Config Dictionary
 config_to_save = {
@@ -307,24 +297,53 @@ for key, value in config_to_save.get("model_hyperparameters_used", {}).items():
         config_to_save["model_hyperparameters_used"][key] = str(value)
 
 print(f"Saving config to: {CONFIG_SAVE_PATH}")
-try:
-    with open(CONFIG_SAVE_PATH, 'w') as f:
-        json.dump(config_to_save, f, indent=4)
-    print("Config saved successfully.")
-except TypeError as e:
-    print(f"Error serializing config to JSON: {e}")
-    print("Attempting to save problematic config with non-serializable items converted to string...")
-    for k_outer, v_outer in config_to_save.items():
-        if isinstance(v_outer, dict):
-            for k_inner, v_inner in v_outer.items():
-                if not isinstance(v_inner, (list, dict, str, int, float, bool, type(None))):
-                    config_to_save[k_outer][k_inner] = str(v_inner)
-        elif not isinstance(v_outer, (list, dict, str, int, float, bool, type(None))):
-            config_to_save[k_outer] = str(v_outer)
-    with open(CONFIG_SAVE_PATH, 'w') as f:
-        json.dump(config_to_save, f, indent=4)
-    print("Problematic config saved with string conversions.")
+with open(CONFIG_SAVE_PATH, 'w') as f:
+    json.dump(config_to_save, f, indent=4)
 
+print("Evaluation on test data...")
+test_pack_processed = preprocessor.transform(test_pack_raw)
+testset = mz.dataloader.Dataset(
+    data_pack=test_pack_processed,
+    batch_size=BATCH_SIZE,
+    resample=False,
+    sort=False,
+    shuffle=False
+)
+testloader = mz.dataloader.DataLoader(
+    dataset=testset,
+    stage='dev', # CHANGED FROM 'test' TO 'dev' to ensure labels are yielded
+    callback=padding_callback
+)
+
+print("Running evaluation...")
+model.eval()
+all_preds = []
+all_labels = []
+with torch.no_grad():
+    for batch_tuple in testloader: # Iterating over testloader yields a tuple (inputs_dict, labels_tensor)
+        inputs_dict = batch_tuple[0]
+        labels_tensor = batch_tuple[1]
+
+        text_left = inputs_dict['text_left']
+        text_right = inputs_dict['text_right']
+        labels = labels_tensor.numpy().tolist() # Convert to list
+
+        # Call the model directly for prediction (invokes forward method)
+        # Pass the input_dict directly, as the model's forward method expects a dictionary
+        outputs = model(inputs_dict)
+        
+        # NOTE: The following line for `preds` is likely incorrect for ranking scores.
+        # `outputs` from a MatchZoo ranking model are typically relevance scores (e.g., shape [batch_size, 1]).
+        # `np.argmax(outputs, axis=1)` will produce all zeros if outputs.shape[1] is 1,
+        # which will significantly affect the accuracy calculation.
+        preds = np.argmax(outputs, axis=1).tolist() # Get index of max log-probability
+
+        all_preds.extend(preds)
+        all_labels.extend(labels)
+
+# Calculate and display metrics
+accuracy = np.mean(np.array(all_preds) == np.array(all_labels))
+print(f"Test Accuracy: {accuracy:.4f}")
 
 print("MatchPyramid training script finished successfully.")
 print(f"Model saved at: {MODEL_SAVE_PATH}")

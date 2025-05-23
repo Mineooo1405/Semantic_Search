@@ -34,28 +34,22 @@ args = parser.parse_args()
 
 # Determine the dataset name part from the path
 dataset_name_part = os.path.basename(args.train_file)
-
 # Define the base directory for this model type
 model_save_dir_base = "trained_drmm_model"
+# Construct the full save directory path using pathlib for robustness
+full_save_dir = Path(model_save_dir_base) / dataset_name_part
+full_save_dir.mkdir(parents=True, exist_ok=True)
+print(f"[DRMM Script] All outputs will be saved in: {full_save_dir}")
 
-# Construct the full save directory path
-full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
+EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt"
+EMBEDDING_DIMENSION = 300
 
-# Ensure the directory exists
-os.makedirs(full_save_dir, exist_ok=True)
-print(f"[DRMM Script] Model will be saved in: {full_save_dir}")
+MODEL_SAVE_PATH = full_save_dir / "drmm_model.pt"
+PREPROCESSOR_SAVE_PATH = full_save_dir / "drmm_preprocessor.dill"
+CONFIG_SAVE_PATH = full_save_dir / "drmm_config.json"
 
-EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt" # NOTE: This path points to 100D. Update if using 300D.
-EMBEDDING_DIMENSION = 300 # Changed from 100 to 300 to match notebook
-
-OUTPUT_DIR = Path("D:/SemanticSearch/trained_drmm_model")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_SAVE_PATH = OUTPUT_DIR / "drmm_model.pt"
-# PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "drmm_preprocessor.dill" # Path for the preprocessor file
-CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json" # ADDED: Path for the config file
-
-HIST_BIN_SIZE = 30
-BATCH_SIZE = 20
+HIST_BIN_SIZE = 15
+BATCH_SIZE = 32 # MODIFIED from 20 to 32
 EPOCHS = 10
 
 try:
@@ -84,7 +78,7 @@ def safe_get_param_value(params_table, key, default_val):
     return default_val
 
 print("Defining ranking task for DRMM...")
-ranking_task = mz.tasks.Ranking(losses=mz.losses.RankCrossEntropyLoss(num_neg=10))
+ranking_task = mz.tasks.Ranking(losses=mz.losses.RankCrossEntropyLoss(num_neg=4))
 ranking_task.metrics = [
     mz.metrics.NormalizedDiscountedCumulativeGain(k=3),
     mz.metrics.NormalizedDiscountedCumulativeGain(k=5),
@@ -92,51 +86,62 @@ ranking_task.metrics = [
 ]
 print(f"`ranking_task` initialized with loss: {ranking_task.losses[0]} and metrics: {ranking_task.metrics}")
 
-def load_triplet_data_from_tsv(file_path, delimiter='\t'):
-    print(f"Loading triplet data from: {file_path} with delimiter '{delimiter}'")
-    data = []
+# --- Helper function to load triplet data from TSV and convert to pairs ---
+def load_pair_from_triplet(file_path, delimiter='\t'):
+    """Convert a TSV triplet file (q, pos, neg) into two rows with numeric labels."""
+    rows = []
+    print(f"Loading and converting triplet data from: {file_path} with delimiter \'{delimiter}\'")
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
                 parts = line.strip().split(delimiter)
                 if len(parts) == 3:
-                    data.append(parts)
+                    q, pos, neg = parts
+                    rows.append({'text_left': q, 'text_right': pos, 'label': 1})
+                    rows.append({'text_left': q, 'text_right': neg, 'label': 0})
                 else:
                     print(f"Skipping malformed line #{i+1} (expected 3 columns, got {len(parts)}): {line.strip()}")
-        print(f"Loaded {len(data)} triplets from {file_path}.")
-        if not data:
-            print(f"WARNING: No data loaded from {file_path}. Check the file format and delimiter.")
-        return data
+        print(f"Loaded and converted {len(rows)//2} triplets (resulting in {len(rows)} pairs) from {file_path}.")
+        if not rows:
+            print(f"WARNING: No data loaded/converted from {file_path}. Check the file format and delimiter.")
+        return rows
     except FileNotFoundError:
         print(f"ERROR: File not found: {file_path}")
         return []
     except Exception as e:
         print(f"ERROR: Could not read file {file_path}: {e}")
         return []
+
 TRAIN_FILE_PATH = args.train_file
 DEV_FILE_PATH = args.dev_file
 TEST_FILE_PATH = args.test_file
 
-source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
-source_test_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
-source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
-
 print("Loading CUSTOM dataset...")
+source_train_data = load_pair_from_triplet(TRAIN_FILE_PATH)
+source_dev_data = load_pair_from_triplet(DEV_FILE_PATH)
+source_test_data = load_pair_from_triplet(TEST_FILE_PATH)
 
 if not source_train_data:
     print("CRITICAL: Training data is empty. Exiting.")
-    exit(1)
+    sys.exit(1) # Ensure sys is imported
 if not source_dev_data:
     print("CRITICAL: Development/Validation data is empty. Exiting.")
-    exit(1)
+    sys.exit(1) # Ensure sys is imported
 
-source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
-source_test_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
-source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
+# Create DataFrame from the loaded list of dicts
+train_df = pd.DataFrame(source_train_data)
+dev_df = pd.DataFrame(source_dev_data)
+test_df = pd.DataFrame(source_test_data)
 
-train_df = pd.DataFrame(source_train_data, columns=['text_left', 'text_right', 'label'])
-test_df = pd.DataFrame(source_test_data, columns=['text_left', 'text_right', 'label'])
-dev_df = pd.DataFrame(source_dev_data, columns=['text_left', 'text_right', 'label'])
+# Check if DataFrames are empty after loading
+if train_df.empty:
+    print("CRITICAL: Training DataFrame is empty after loading. Exiting.")
+    sys.exit(1) # Ensure sys is imported
+if dev_df.empty:
+    print("CRITICAL: Development/Validation DataFrame is empty after loading. Exiting.")
+    sys.exit(1) # Ensure sys is imported
+if test_df.empty:
+    print("WARNING: Test DataFrame is empty after loading.")
 
 train_pack_raw = mz.pack(train_df, task=ranking_task)
 dev_pack_raw = mz.pack(dev_df, task=ranking_task)
@@ -184,8 +189,8 @@ print("Creating Datasets and DataLoaders...")
 trainset = mz.dataloader.Dataset(
     data_pack=train_pack_processed,
     mode='pair',
-    num_dup=5,
-    num_neg=10,
+    num_dup=1,
+    num_neg=4,
     batch_size=BATCH_SIZE,
     resample=True,
     sort=False,
@@ -217,7 +222,7 @@ print("Setting up DRMM model...")
 model = mz.models.DRMM()
 model.params['task'] = ranking_task
 model.params['embedding'] = embedding_matrix
-model.params['embedding_freeze'] = False # Ensure embeddings are trainable
+model.params['embedding_freeze'] = True # Ensure embeddings are trainable
 model.params['mask_value'] = 0
 model.params['hist_bin_size'] = HIST_BIN_SIZE
 model.params['mlp_num_layers'] = 1
@@ -230,10 +235,10 @@ print("DRMM Model built.")
 print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
 print("Setting up Trainer...")
-optimizer = torch.optim.Adadelta(model.parameters()) # Changed from Adam to Adadelta to match notebook
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4) # CHANGED from Adadelta
 # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3) # Optional: add if needed
 
-NUM_TRAIN_EPOCHS = 10 # Ensure this is defined, e.g., 10 or from args
+NUM_TRAIN_EPOCHS = EPOCHS # Ensure this is defined, e.g., 10 or from args # CHANGED from 10 to EPOCHS
 
 trainer = mz.trainers.Trainer(
     model=model,
@@ -257,7 +262,15 @@ print("Training finished.")
 # --- Consolidate Artifact Saving ---
 print("Preparing and saving model, preprocessor, and config...")
 
-# 1. Create Config Dictionary
+# 1. Save Model
+print(f"Saving model to: {MODEL_SAVE_PATH}")
+torch.save(model.state_dict(), MODEL_SAVE_PATH)
+
+# 2. Save Preprocessor
+print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}")
+preprocessor.save(PREPROCESSOR_SAVE_PATH)
+
+# 3. Create and Save Config Dictionary
 config_to_save = {
     "model_name": "DRMM",
     "model_class": model.__class__.__name__,
@@ -279,59 +292,24 @@ config_to_save = {
     },
     "embedding_source_file": EMBEDDING_FILE_PATH if 'EMBEDDING_FILE_PATH' in globals() and EMBEDDING_FILE_PATH and os.path.exists(EMBEDDING_FILE_PATH) else "random_dummy_embeddings_or_not_specified",
     "embedding_dim_configured": EMBEDDING_DIMENSION,
-    "batch_size": BATCH_SIZE,
+    "batch_size_configured": BATCH_SIZE,
     "epochs_configured": EPOCHS,
-    "epochs_completed": trainer._epoch if hasattr(trainer, '_epoch') else 0,
-    "patience_used": trainer._early_stopping.patience if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'patience') else None,
-    "validate_interval": trainer._validate_interval if hasattr(trainer, '_validate_interval') else None,
-    "early_stopping_key": trainer._early_stopping.key if hasattr(trainer, '_early_stopping') and hasattr(trainer._early_stopping, 'key') else None,
-    "device_used_for_training": str(trainer._device) if hasattr(trainer, '_device') else None,
-    "trainer_verbose_level": trainer._verbose if hasattr(trainer, '_verbose') else 1,
-    "preprocessor_context": {
-        "fixed_length_left": preprocessor.context.get('fixed_length_left'),
-        "fixed_length_right": preprocessor.context.get('fixed_length_right'),
-        "vocab_size": preprocessor.context.get('vocab_size'),
-        "embedding_input_dim": preprocessor.context.get('embedding_input_dim'), # Typically vocab_size + 1
-        # "vocab_path": str(Path(preprocessor.context.get('vocab_unit')._state.get('term_index_path')).resolve()) if preprocessor.context.get('vocab_unit') and preprocessor.context.get('vocab_unit')._state.get('term_index_path') else None,
-        "vocab_path": None, # Initialize to None
-    },
+    "hist_bin_size_configured": HIST_BIN_SIZE,
+    "num_neg_train_dataset": trainset.num_neg if hasattr(trainset, 'num_neg') else None,
+    "num_dup_train_dataset": trainset.num_dup if hasattr(trainset, 'num_dup') else None,
+    "fixed_length_left_preprocessor": preprocessor.context.get('fixed_length_left'),
+    "fixed_length_right_preprocessor": preprocessor.context.get('fixed_length_right'),
+    "vocab_size_from_preprocessor_context": preprocessor.context.get('vocab_size'),
     "matchzoo_version": mz.__version__,
-    "pytorch_version": torch.__version__,
-    "numpy_version": np.__version__,
-    "pandas_version": pd.__version__,
-    "training_script": os.path.basename(__file__),
-    "training_date": pd.Timestamp.now().isoformat(),
-    "output_directory": str(OUTPUT_DIR.resolve())
+    "training_script_path": str(Path(__file__).resolve()),
+    "timestamp": datetime.now().isoformat()
 }
 
-# Get vocab_path safely for Python 3.7
-vocab_unit_object = preprocessor.context.get('vocab_unit')
-if vocab_unit_object and hasattr(vocab_unit_object, 'state') and isinstance(vocab_unit_object.state, dict):
-    term_index_path_value = vocab_unit_object.state.get('term_index_path')
-    if term_index_path_value:
-        config_to_save["preprocessor_context"]["vocab_path"] = str(Path(term_index_path_value).resolve())
-
-# Ensure all values in model_hyperparameters_used are serializable (e.g. numpy types to python types)
-for key, value in config_to_save.get("model_hyperparameters_used", {}).items():
-    if hasattr(value, 'item'): # For numpy types like np.int32
-        config_to_save["model_hyperparameters_used"][key] = value.item()
-
-# 2. Save Config
-with open(CONFIG_SAVE_PATH, 'w', encoding='utf-8') as f:
+print(f"Saving config to: {CONFIG_SAVE_PATH}")
+with open(CONFIG_SAVE_PATH, 'w') as f:
     json.dump(config_to_save, f, indent=4)
-print(f"Config saved to {CONFIG_SAVE_PATH}")
 
-# 3. Save Model
-print(f"Saving model to: {MODEL_SAVE_PATH}")
-torch.save(model.state_dict(), MODEL_SAVE_PATH)
+print("All artifacts (model, preprocessor, config) saved.")
 
-# 4. Save Preprocessor
-# preprocessor.save() expects a directory and saves "preprocessor.dill" within it.
-preprocessor_file_in_output_dir = OUTPUT_DIR / "preprocessor.dill"
-print(f"Saving preprocessor to directory: {OUTPUT_DIR} (will be saved as {preprocessor_file_in_output_dir})")
-preprocessor.save(OUTPUT_DIR) # Pass the directory
-
-print("\nDRMM training script finished successfully.")
-print(f"Model saved at: {MODEL_SAVE_PATH}")
-print(f"Preprocessor saved at: {preprocessor_file_in_output_dir}") # Updated path
-print(f"Config saved at: {CONFIG_SAVE_PATH}")
+# --- Evaluation (Optional) ---
+# ...existing code...

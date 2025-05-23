@@ -29,20 +29,27 @@ args = parser.parse_args()
 # --- Script Configuration ---
 TRAIN_FILE_PATH = args.train_file 
 DEV_FILE_PATH = args.dev_file 
-TEST_FILE_PATH = args.test_file 
+TEST_FILE_PATH = args.test_file
 
 EMBEDDING_FILE_PATH = r"D:/SemanticSearch/embedding/glove.6B/glove.6B.300d.txt" # Note: This path likely points to 100D embeddings. You may need to update it for 300D.
 EMBEDDING_DIMENSION = 300 # Changed from 100 to 300 to match notebook
 
-OUTPUT_DIR = Path("D:/SemanticSearch/trained_arci_model")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-MODEL_SAVE_PATH = OUTPUT_DIR / "arci_model.pt"
-# PREPROCESSOR_SAVE_PATH = OUTPUT_DIR / "arci_preprocessor.dill" # Will be saved in OUTPUT_DIR
-CONFIG_SAVE_PATH = OUTPUT_DIR / "config.json" # ADDED: Path for the config file
+# Determine the dataset name part from the path
+dataset_name_part = os.path.basename(args.train_file)
+# Define the base directory for this model type
+model_save_dir_base = "trained_arci_model"
+# Construct the full save directory path
+full_save_dir = Path(model_save_dir_base) / dataset_name_part
+full_save_dir.mkdir(parents=True, exist_ok=True)
+print(f"[ArcI Script] All outputs will be saved in: {full_save_dir}")
+
+MODEL_SAVE_PATH = full_save_dir / "arci_model.pt"
+PREPROCESSOR_SAVE_PATH = full_save_dir / "arci_preprocessor.dill"
+CONFIG_SAVE_PATH = full_save_dir / "config.json"
 
 FIXED_LENGTH_LEFT = 10
 FIXED_LENGTH_RIGHT = 100
-BATCH_SIZE = 20
+BATCH_SIZE = 32 # Changed from 20
 EPOCHS = 10
 
 try:
@@ -72,7 +79,7 @@ def safe_get_param_value(params_table, key, default_val):
 
 # --- Task Definition ---
 print("Defining ranking task for ArcI...")
-ranking_task = mz.tasks.Ranking(losses=mz.losses.RankHingeLoss())
+ranking_task = mz.tasks.Ranking(losses=mz.losses.RankHingeLoss(num_neg=4, margin=0.2)) # MODIFIED: Added num_neg=4
 ranking_task.metrics = [
     mz.metrics.NormalizedDiscountedCumulativeGain(k=3),
     mz.metrics.NormalizedDiscountedCumulativeGain(k=5),
@@ -80,45 +87,44 @@ ranking_task.metrics = [
 ]
 print(f"`ranking_task` initialized with loss: {ranking_task.losses[0]} and metrics: {ranking_task.metrics}")
 
-# --- Helper function to load triplet data from TSV ---
-def load_triplet_data_from_tsv(file_path, delimiter='\t'):
-    print(f"Loading triplet data from: {file_path} with delimiter '{delimiter}'")
-    data = []
+# --- Helper function to load triplet data from TSV and convert to pairs ---
+def load_pair_from_triplet(path, delimiter='\t'): # MODIFIED: Corrected delimiter
+    """Convert a TSV triplet file (q, pos, neg) into two rows with numeric labels."""
+    rows = []
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for i, line in enumerate(f):
-                parts = line.strip().split(delimiter)
+        with open(path, 'r', encoding='utf-8') as f:
+            for line_num, line_content in enumerate(f, 1):
+                parts = line_content.rstrip('\n').split(delimiter) # MODIFIED: Corrected rstrip
                 if len(parts) == 3:
-                    data.append(parts)
+                    q, pos, neg = parts
+                    rows.append({'text_left': q, 'text_right': pos, 'label': 1})
+                    rows.append({'text_left': q, 'text_right': neg, 'label': 0})
                 else:
-                    print(f"Skipping malformed line #{i+1} (expected 3 columns, got {len(parts)}): {line.strip()}")
-        print(f"Loaded {len(data)} triplets from {file_path}.")
-        if not data:
-            print(f"WARNING: No data loaded from {file_path}. Check the file format and delimiter.")
-        return data
+                    print(f"Warning: Line {line_num} in {path} is malformed (expected 3 parts, got {len(parts)}): '{line_content.strip()}'")
     except FileNotFoundError:
-        print(f"ERROR: File not found: {file_path}")
-        return []
+        print(f"Error: File {path} not found.")
+        # Return empty list or raise error as appropriate for your workflow
     except Exception as e:
-        print(f"ERROR: Could not read file {file_path}: {e}")
-        return []
+        print(f"Error processing file {path}: {e}")
+        # Return empty list or raise error
+    return rows
 
 # --- Load CUSTOM Dataset ---
 print("Loading CUSTOM dataset...")
-source_train_data = load_triplet_data_from_tsv(TRAIN_FILE_PATH)
-source_dev_data = load_triplet_data_from_tsv(DEV_FILE_PATH)
-source_test_data = load_triplet_data_from_tsv(TEST_FILE_PATH)
+train_list_of_dicts = load_pair_from_triplet(TRAIN_FILE_PATH)
+dev_list_of_dicts = load_pair_from_triplet(DEV_FILE_PATH)
+test_list_of_dicts = load_pair_from_triplet(TEST_FILE_PATH)
 
-if not source_train_data:
+if not train_list_of_dicts:
     print("CRITICAL: Training data is empty. Exiting.")
     exit(1)
-if not source_dev_data:
+if not dev_list_of_dicts: # Check dev data as well, as per original script logic
     print("CRITICAL: Development/Validation data is empty. Exiting.")
     exit(1)
 
-train_df = pd.DataFrame(source_train_data, columns=['text_left', 'text_right', 'label'])
-dev_df = pd.DataFrame(source_dev_data, columns=['text_left', 'text_right', 'label'])
-test_df = pd.DataFrame(source_test_data, columns=['text_left', 'text_right', 'label'])
+train_df = pd.DataFrame(train_list_of_dicts)
+dev_df = pd.DataFrame(dev_list_of_dicts)
+test_df = pd.DataFrame(test_list_of_dicts)
 
 # Create MatchZoo DataPacks
 train_pack_raw = mz.pack(train_df, task=ranking_task)
@@ -169,10 +175,10 @@ else:
 print("Creating Datasets and DataLoaders...")
 trainset = mz.dataloader.Dataset(
     data_pack=train_pack_processed,
-    mode='pair',  
-    num_dup=2,
-    num_neg=1,
-    batch_size=BATCH_SIZE,
+    mode='pair',
+    num_dup=1, # Changed from 2
+    num_neg=4, # Changed from 1
+    batch_size=BATCH_SIZE, # Now 32
     resample=True,
     sort=False
 )
@@ -235,19 +241,6 @@ print(f'Trainable params: {trainable_params}')
 # optimizer = optim.Adadelta(model.parameters()) # Changed from Adam to Adadelta, removed lr
 optimizer = optim.Adam(model.parameters(), lr=0.0001) # Using Adam as it showed improvement
 
-# Determine the dataset name part from the path
-dataset_name_part = os.path.basename(TRAIN_FILE_PATH)
-
-# Define the base directory for this model type
-model_save_dir_base = "trained_arci_model"
-
-# Construct the full save directory path
-full_save_dir = os.path.join(model_save_dir_base, dataset_name_part)
-
-# Ensure the directory exists
-os.makedirs(full_save_dir, exist_ok=True)
-print(f"[ArcI Script] Model will be saved in: {full_save_dir}")
-
 trainer = mz.trainers.Trainer(
     model=model,
     optimizer=optimizer,
@@ -255,6 +248,7 @@ trainer = mz.trainers.Trainer(
     validloader=validloader,
     validate_interval=None, 
     epochs=EPOCHS,
+    save_dir=str(full_save_dir), # Ensure save_dir is a string
     patience=EPOCHS,  # Changed from EPOCHS to 3
     key=ranking_task.metrics[0]  # Changed from ranking_task.metrics
 )
@@ -268,7 +262,15 @@ print("Training finished.")
 # --- Consolidate Artifact Saving ---
 print("Preparing and saving model, preprocessor, and config...")
 
-# 1. Create Config Dictionary
+# 1. Save Model
+print(f"Saving model to: {MODEL_SAVE_PATH}")
+torch.save(model.state_dict(), MODEL_SAVE_PATH)
+
+# 2. Save Preprocessor
+print(f"Saving preprocessor to: {PREPROCESSOR_SAVE_PATH}")
+preprocessor.save(PREPROCESSOR_SAVE_PATH)
+
+# 3. Create and Save Config Dictionary
 config_to_save = {
     "model_name": "ArcI",
     "model_class": model.__class__.__name__,
@@ -322,39 +324,16 @@ config_to_save = {
     "numpy_version": np.__version__,
     "pandas_version": pd.__version__,
     "training_script": os.path.basename(__file__),
-    "training_date": datetime.now().isoformat(),
-    "output_directory": str(OUTPUT_DIR.resolve())
+    "training_script_path": str(Path(__file__).resolve()),
+    "timestamp": datetime.now().isoformat()
 }
 
-# Get vocab_path safely (Python 3.7 compatible)
-vocab_unit_object = preprocessor.context.get('vocab_unit')
-if vocab_unit_object and hasattr(vocab_unit_object, 'state') and isinstance(vocab_unit_object.state, dict):
-    term_index_path_value = vocab_unit_object.state.get('term_index_path')
-    if term_index_path_value:
-        config_to_save["preprocessor_context"]["vocab_path"] = str(Path(term_index_path_value).resolve())
-
-# Ensure all values in model_hyperparameters_used are serializable
-for key, value in config_to_save.get("model_hyperparameters_used", {}).items():
-    if hasattr(value, 'item'): # For numpy types
-        config_to_save["model_hyperparameters_used"][key] = value.item()
-
-# 2. Save Config
-with open(CONFIG_SAVE_PATH, 'w', encoding='utf-8') as f:
+print(f"Saving config to: {CONFIG_SAVE_PATH}")
+with open(CONFIG_SAVE_PATH, 'w') as f:
     json.dump(config_to_save, f, indent=4)
-print(f"Config saved to {CONFIG_SAVE_PATH}")
 
-# 3. Save Model
-print(f"Saving model to: {MODEL_SAVE_PATH}")
-torch.save(model.state_dict(), MODEL_SAVE_PATH) 
+print("All artifacts (model, preprocessor, config) saved.")
 
-# 4. Save Preprocessor
-# preprocessor.save() expects a directory and saves "preprocessor.dill" within it.
-preprocessor_file_in_output_dir = OUTPUT_DIR / "preprocessor.dill"
-print(f"Saving preprocessor to directory: {OUTPUT_DIR} (will be saved as {preprocessor_file_in_output_dir})")
-preprocessor.save(OUTPUT_DIR) # Pass the directory
-
-print("\\nArcI training script finished successfully.")
-print(f"Model saved at: {MODEL_SAVE_PATH}")
-print(f"Preprocessor saved at: {preprocessor_file_in_output_dir}") # Updated path
-print(f"Config saved at: {CONFIG_SAVE_PATH}")
+# --- Evaluation (Optional) ---
+# ... existing evaluation code if any ...
 
